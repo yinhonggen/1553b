@@ -1,0 +1,437 @@
+
+
+
+
+
+
+XR16C854串口移植总结文档
+ 
+目 录
+一.硬件设备（DEVICE）描述	3
+1.1 AXI总线	3
+1.1.1 AXI总线特点	4
+1.1.2 AXI总线的三种接口	4
+1.1.3 AXI总线的通道介绍	4
+1.2  ZYNQ芯片AXI总线的地址分配	6
+1.3 ARM的编址方式	6
+1.4 ZYNQ中断分配以及LINUX系统下中断的操作步骤	7
+1.4.1 zynq中断分配情况	7
+1.4.2 linux系统下中断的操作步骤	8
+1.5 XR16C854在LINUX系统下的DEVICE配置	9
+二. PLATFORM总线介绍	10
+2.1 PLATFORM_DEVICE注册	10
+2.2 PLATFORM_DRIVER注册	12
+2.3 PLATFORM_DEVICE和PLATFORM_DRIVER的匹配	13
+三. LINUX串口（SERIAL、UART）驱动	14
+3.1核心数据结构	14
+3.2串口驱动API	20
+四. 调试记录	23
+4.1驱动的动态加载及配置	23
+4.2驱动代码修改	24
+总结：	26
+
+ 
+    XR16C854是一个通用串行异步收发器，与ST16C554/654等串口芯片接口兼容。854是一个增强型UART，它有128字节的FIFO，独立的发送和接收FIFO计数器，自动的软/硬件流控，数据传输速率高达1.5Mbps。在linux下移植XR16C854的驱动主要是理解设备，总线和驱动这三者之间的关系，下面就围绕这三个方面展开说明。
+一.硬件设备（device）描述
+    由于XR16C854芯片有地址线和数据线，读写控制信号等，所以一般要使用它需要将其外接到控制器的外部总线上，如: local bus总线，EBI总线接口等。下面的框图为一般的接法：
+ 
+图1 控制器和串口芯片的连接框图
+我们将XR16C854芯片接到了AXI总线上的GP模式，通过去操作AXI总线，从而去控制串口芯片。
+1.1 AXI总线
+    AXI全称Advanced eXtensible Interface，是Xilinx从6系列的FPGA开始引入的一个接口协议，主要描述了主设备和从设备之间的数据传输方式。在ZYNQ中继续使用，版本是AXI4，所以我们经常会看到AXI4.0，ZYNQ内部设备都有AXI接口。其实AXI就是ARM公司提出的AMBA（Advanced Microcontroller Bus Architecture）的一个部分，是一种高性能、高带宽、低延迟的片内总线，也用来替代以前的AHB和APB总线。第一个版本的AXI（AXI3）包含在2003年发布的AMBA3.0中，AXI的第二个版本AXI（AXI4）包含在2010年发布的AMBA 4.0之中。
+1.1.1 AXI总线特点
+1)	总线的地址/控制和数据通道是分离的；
+2)	支持不对齐的数据传输；
+3)	在突发数据传输中只需要首地址；
+4)	同时具有分离读/写数据通道；
+5)	支持显著传输访问和乱序访问；
+6)	更加容易进行时序收敛
+1.1.2 AXI总线的三种接口
+1)	AXI_ACP ：用于PL的一个加速一致性主端口，提供快速访问CPU，可选的L1或L2缓存一致性；
+2)	AXI_HP ：面向高速的流数据传输，不需要地址线（很像FIFO，一直读或一直写就行）。对于这类IP，ARM不能通过上面的内存映射方式控制（FIFO根本没有地址的概念），必须有一个转换装置，例如AXI-DMA模块来实现内存映射到流式接口的转换。AXI-	HP适用的场合有很多：视频流处理，通信协议转换，数字信号处理，无线通信等。
+3)	AXI_GP ：具有轻量级，结构简单的特点，适合小批量数据、简单控制场合，映射后可直接当作内存去访问，操作简单。
+1.1.3 AXI总线的通道介绍
+AXI接口具有5个独立通道： 
+1)	写地址通道（Write address channel，AW）； 
+2)	写数据通道（Write data channel，W）；
+3)	写响应通道（Write response channel，B）； 
+4)	读地址通道（Read address channel，AR）； 
+5)	读数据通道（Read data channel，R）； 
+每个通道都是一个独立的AXI握手协议:
+1)	每个通道都有一对VALID/READY信号；
+2)	发送方用VALID指示什么时候数据或控制信息是有效的；接收方用READY指示可以接收数据或控制信息。
+3)	传输发生在VALID和READY信号同时为高的时候。 
+通道之间的关系： 
+1)	各个通道都可以独立握手，相互之间的关系是灵活的；
+2)	读数据必须总是跟在与其数据相关联的地址之后； 
+3)	写响应必须总是跟在与其相关联的写交易的最后出现 
+ 
+图2读交易中的握手之间的依赖关系 
+ 
+图3写交易中的握手之间的依赖关系 
+ 
+图4读交易过程
+ 
+图5写交易过程
+1.2  zynq芯片AXI总线的地址分配
+       AXI_GP在zynq芯片中可访问的地址空间如下所示：
+ 
+图6 AXI_GP可访问的地址范围
+我们的寻址范围也是要在这个范围之类0x40000000到0x7FFFFFFF，我们去操作串口芯片的寄存器，实际上就是直接去操作这块内存空间的地址。
+1.3 ARM的编址方式
+     外设都是通过读写设备上的寄存器来进行的，外设寄存器也称为“I/O端   口”，而IO端口有两种编址方式：独立编址和统一编制。
+1)	统一编址：外设接口中的IO寄存器（即IO端口）与主存单元一样看待，每个端口占用一个存储单元的地址，将主存的一部分划出来用作IO地址空间。统一编址也称为“I/O内存”方式，外设寄存器位于“内存空间”（很多外设有自己的内存、缓冲区，外设的寄存器和内存统称“I/O空间”）。
+2)	独立编址（单独编址）：IO地址与存储地址分开独立编址，I/0端口地址不占用存储空间的地址范围，这样，在系统中就存在了另一种与存储地址无关的IO地 址，CPU也必须具有专用与输入输出操作的IO指令（IN、OUT等）和控制逻辑。独立编址下，地址总线上过来一个地址，设备不知道是给IO端口的、还是 给存储器的，于是处理器通过MEMR/MEMW和IOR/IOW两组控制信号来实现对I/O端口和存储器的不同寻址。
+     ARM采用统一编址的，它不提供I/O空间，仅有内存空间，可直接用地址进行访问，也就是我们所说的“I/O内存”，IO地址空间是物理主存的一部分，CPU对外设端口物理地址的编址方式采用内存映射的方式，Linux将基于内存映射方式的IO端口去操作外围控制器。
+     I/O内存的操作主要包括以下几点：
+1)	I/O内存的申请：
+request_mem_region(start,n,name)；
+2)	I/O内存的映射：
+void __iomem *ioremap(unsigned long offset, unsigned long size);
+3)	I/O内存的访问：
+8位：ioread8(), iowrite8()
+16位：ioread16(), iowrite16()
+32位：ioread32(), iowrite32()
+老版本：readb, readw, readl,writeb, writew, writel
+4)	I/O内存的释放:
+void iounmap(volatile void __iomem *virtual);
+release_mem_region(start,n);
+1.4 zynq中断分配以及linux系统下中断的操作步骤
+1.4.1 zynq中断分配情况
+    zynq中断分为三种Private Peripheral Interrupts (PPI), PS and PL Shared Peripheral Interrupts (SPI)和Software Generated Interrupts (SGI)。中断号的分配和使用如下图所示：
+ 
+图7 PPI
+  
+图8 SPI
+ 
+图9 SGI
+1.4.2 linux系统下中断的操作步骤
+    整个中断可以分为以下几个大的流程：中断初始化，中断注册和申请，中断的处理。
+1)	中断初始化流程:初始化主要是对寄存器的设置，这部分工作其实在内核启动的时候就已经初始化了，其中最重要的就是初始化irq_chip结构，使得其中的众多函数已经设置好了，可以被调用了。
+2)	中断注册和申请流程：我们每次用中断的时候就是注册一个中断函数。request_irq首先生成一个irqaction结构，其次根据中断号找到irq_desc数组项，然后将irqaction结构添加到 irq_desc中的action链表中。注册完成后，中断函数就可以发生并被处理了。
+3)	中断的处理流程:这个流程主要是产生中断后调用irq_chip中的函数来屏蔽，清除中断等等，然后调用irqaction结构中用户注册的中断函数处理中断。
+有以下几个函数经常使用：
+获取中断号：unsigned int get_irq(void);
+申请中断：int request_irq(unsigned int irq, irq_handler_t handler, unsigned long irqflags, const char *devname, void *dev_id);
+使能中断：void enable_irq(unsigned int irq);
+禁止中断：void disable_irq(unsigned int irq);
+注销中断：void free_irq(unsigned int irq, void *dev_id)；
+1.5 XR16C854在linux系统下的device配置
+    在确定了CPU的编址方式和中断分配后，我们就可以把访问四个串口的基地址给计算出来，在linux系统中设备这一侧只需要提供硬件的板级信息即可，既基地址和中断号。
+ 
+图10 硬件资源的配置
+二. platform总线介绍
+    总线设备驱动模型主要包含总线、设备、驱动三个部分，总线可以是一条真实存在的总线，例如USB、I2C等典型的设备。但是对于一些设备（内部的设备）可能没有现成的总线。Linux 2.6内核中引入了总线设备驱动模型。总线设备驱动模型与之前的三类驱动（字符、块设备、网络设备）没有必然的联系。设备只是搭载到了总线中。在linux内核中假设存在一条虚拟总线，称之为platform总线。platform总线相比与常规的总线模型其优势主要是platform总线是由内核实现的，而不用自己定义总线类型，总线设备来加载总线。platform总线是内核已经实现好的。只需要添加相应的platform device和platform driver。具体的实现过程主要包括如下的过程：两者的工作顺序是先定义platform_device ->注册platform_device->，再定义platform_driver->注册platform_driver。整体而言只需要完成两个步骤，也就是设备的实现和驱动的实现，每一个实现都包括相关结构体的定义和注册。
+2.1 platform_device注册
+platform_device实质上是经过处理过的设备，在platform_device结构体中存在一个设备结构体，与之前的设备存在差别的是引入了设备资源。这些设备资源就能实现对设备寄存器，中断等资源的访问。平台设备的基本结构体如下：
+struct platform_device {
+  const char    * name;  /*设备名*/ 
+  int        id;     /*设备ID号*/
+  struct device    dev; /*结构体包含一个具体的device结构体*/
+  u32num_resources;   /*资源的数量*/
+  struct resource    * resource; /*资源结构体，用来保存硬件的资源*/
+  struct platform_device_id    *id_entry;  /*平台设备的ID*/
+};
+struct resource { 
+   resource_size_t start; /*资源的起始值，如果是地址，那么是物理地址，不是虚拟地址*/ 
+   resource_size_t end; /*资源的结束值，如果是地址，那么是物理地址，不是虚拟地址*/
+   const char *name; /*资源名*/
+   unsigned long flags; /*资源的标示，用来识别不同的资源*/
+   struct resource *parent, *sibling, *child; /*资源指针，可以构成链表*/
+};
+    platform_device的注册很简单，只需要在设备的初始化函数中首先定义相应的设备，通常采用函数platform_device *platform_device_alloc(const char *name, int id)动态申请，通常name就是需要申请的设备名，而id为-1。然后采用int platform_device_add(structplatform_device *pdev)或者int platform_device_register(structplatform_device *pdev)注册定义好的设备即可。同样在退出函数中释放注册好的设备即可，可以采用函数：void platform_device_unregister(structplatform_device *pdev)。然后一个平台设备就完成了，不需要像自己实现模型时定义相关的文件属性等。
+ 
+图11 XR16C854设备的注册
+2.2 platform_driver注册
+平台驱动结构体platform_driver实现如下：
+struct platform_driver {
+  int (*probe)(structplatform_device *); 
+  int (*remove)(structplatform_device *); 
+  void (*shutdown)(structplatform_device *); 
+  int (*suspend)(structplatform_device *, pm_message_t state); 
+  int (*suspend_late)(structplatform_device *, pm_message_t state); 
+  int (*resume_early)(structplatform_device *); 
+  int (*resume)(structplatform_device *); 
+  struct device_driver driver; /*内嵌了一个设备驱动结构体*/
+  structplatform_device_id *id_table; 
+};
+ 
+图12  8250的驱动注册
+2.3 platform_device和platform_driver的匹配
+     platform_device和platform_driver是通过static int platform_match(struct device *dev, structdevice_driver *drv)这个函数去匹配的，只要device和driver的name匹配上后，驱动就和设备匹配上了，然后就会去调用驱动的入口函数int (*probe)(structplatform_device *);
+总线函数的匹配操作如下：
+static intplatform_match(struct device *dev, structdevice_driver *drv) 
+{
+   structplatform_device *pdev = to_platform_device(dev); /*得到平台设备的指针*/ 
+   structplatform_driver *pdrv = to_platform_driver(drv); /*得到平台驱动指针*/ 
+   if (pdrv->id_table)  /* match against the id table first */
+   return platform_match_id(pdrv->id_table, pdev) != NULL; /*从定义上分析，id_table是首先匹配的对象，然后才是name的匹配，当ID匹配完成时就说明匹配好了*/
+    /* fall-back to driver name match */ 
+   return (strcmp(pdev->name, drv->name) == 0); 
+}
+三. Linux串口（serial、uart）驱动
+3.1核心数据结构
+  串口驱动有3个核心数据结构，它们都定义在<#include linux/serial_core.h>
+1)	uart_driver
+uart_driver包含了串口设备名、串口驱动名、主次设备号、串口控制台(可选)等信息，还封装了tty_driver(底层串口驱动无需关心tty_driver)。
+2)	uart_port
+    uart_port用于描述串口端口的I/O端口或I/O内存地址、FIFO大小、端口类型、串口时钟等信息。实际上，一个uart_port实例对应一个串口设备
+struct uart_port {
+    spinlock_t             lock;           /* 串口端口锁 */
+    unsigned int           iobase;         /* IO端口基地址 */
+    unsigned char __iomem *membase;        /* IO内存基地址,经映射(如ioremap)后的IO内存虚拟基地址 */
+    unsigned int           irq;            /* 中断号 */
+    unsigned int           uartclk;        /* 串口时钟 */
+    unsigned int           fifosize;       /* 串口FIFO缓冲大小 */
+    unsigned char          x_char;         /* xon/xoff字符 */
+    unsigned char          regshift;       /* 寄存器位移 */
+ unsigned char          iotype;         /* IO访问方式 */
+    unsigned char          unused1;
+ #define UPIO_PORT        (0)               /* IO端口 */
+ #define UPIO_HUB6        (1)
+ #define UPIO_MEM         (2)               /* IO内存 */
+ #define UPIO_MEM32       (3)
+  #define UPIO_AU          (4)               /* Au1x00 type IO */
+  #define UPIO_TSI         (5)               /* Tsi108/109 type IO */
+  #define UPIO_DWAPB       (6)               /* DesignWare APB UART */
+  #define UPIO_RM9000      (7)               /* RM9000 type IO */
+    unsigned int        read_status_mask;  /* 关心的Rx error status */
+    unsigned int        ignore_status_mask;/* 忽略的Rx error status */
+    struct uart_info      *info;           /* pointer to parent info */
+    struct uart_icount     icount;         /* 计数器 */
+    struct console        *cons;           /* console结构体 */
+  #ifdef CONFIG_SERIAL_CORE_CONSOLE
+     unsigned long         sysrq;           /* sysrq timeout */
+ #endif
+    upf_t                 flags;
+  #define UPF_FOURPORT         ((__force upf_t) (1 << 1))
+  #define UPF_SAK              ((__force upf_t) (1 << 2))
+  #define UPF_SPD_MASK         ((__force upf_t) (0x1030))
+  #define UPF_SPD_HI           ((__force upf_t) (0x0010))
+  #define UPF_SPD_VHI          ((__force upf_t) (0x0020))
+  #define UPF_SPD_CUST         ((__force upf_t) (0x0030))
+  #define UPF_SPD_SHI          ((__force upf_t) (0x1000))
+  #define UPF_SPD_WARP         ((__force upf_t) (0x1010))
+  #define UPF_SKIP_TEST        ((__force upf_t) (1 << 6))
+  #define UPF_AUTO_IRQ         ((__force upf_t) (1 << 7))
+  #define UPF_HARDPPS_CD       ((__force upf_t) (1 << 11))
+  #define UPF_LOW_LATENCY      ((__force upf_t) (1 << 13))
+  #define UPF_BUGGY_UART       ((__force upf_t) (1 << 14))
+  #define UPF_MAGIC_MULTIPLIER ((__force upf_t) (1 << 16))
+  #define UPF_CONS_FLOW        ((__force upf_t) (1 << 23))
+  #define UPF_SHARE_IRQ        ((__force upf_t) (1 << 24))
+ #define UPF_BOOT_AUTOCONF    ((__force upf_t) (1 << 28))
+ #define UPF_FIXED_PORT       ((__force upf_t) (1 << 29))
+ #define UPF_DEAD             ((__force upf_t) (1 << 30))
+ #define UPF_IOREMAP          ((__force upf_t) (1 << 31))
+ #define UPF_CHANGE_MASK      ((__force upf_t) (0x17fff))
+ #define UPF_USR_MASK         ((__force upf_t) (UPF_SPD_MASK|UPF_LOW_LATENCY))
+    unsigned int             mctrl;        /* 当前的moden设置 */
+    unsigned int             timeout;      /* character-based timeout */        
+    unsigned int             type;         /* 端口类型 */
+    const struct uart_ops   *ops;          /* 串口端口操作函数集 */
+    unsigned int             custom_divisor;
+    unsigned int             line;         /* 端口索引 */
+    resource_size_t          mapbase;      /* IO内存物理基地址，可用于ioremap */
+    struct device           *dev;          /* 父设备 */
+    unsigned char            hub6;         /* this should be in the 8250 driver */
+    unsigned char            suspended;
+    unsigned char            unused[2];
+    void                    *private_data; /* 端口私有数据,一般为platform数据指针 */
+};
+    uart_iconut为串口信息计数器，包含了发送字符计数、接收字符计数等。在串口的发送中断处理函数和接收中断处理函数中，我们需要管理这些计数。
+struct uart_icount {
+    __u32    cts;
+    __u32    dsr;
+    __u32    rng;
+    __u32    dcd;
+    __u32    rx;      /* 发送字符计数 */
+    __u32    tx;      /* 接受字符计数 */
+    __u32    frame;   /* 帧错误计数 */
+    __u32    overrun; /* Rx FIFO溢出计数 */
+    __u32    parity;  /* 帧校验错误计数 */
+    __u32    brk;     /* break计数 */
+    __u32    buf_overrun;
+};
+    uart_info有两个成员在底层串口驱动会用到：xmit和tty。用户空间程序通过串口发送数据时，上层驱动将用户数据保存在xmit；而串口发送中断处理函数就是通过xmit获取到用户数据并将它们发送出去。串口接收中断处理函数需要通过tty将接收到的数据传递给行规则层。
+/* uart_info实例仅在串口端口打开时有效，它可能在串口关闭时被串口核心层释放。因此，在使用uart_port的uart_info成员时必须保证串口已打开。底层驱动和核心层驱动都可以修改uart_info实例。
+ * This is the state information which is only valid when the port
+ * is open; it may be freed by the core driver once the device has
+ * been closed. Either the low level driver or the core can modify
+ * stuff here.
+ */
+struct uart_info {
+    struct tty_struct     *tty;
+    struct circ_buf        xmit;
+    uif_t                  flags;
+/*
+ * Definitions for info->flags. These are _private_ to serial_core, and
+ * are specific to this structure. They may be queried by low level drivers.
+ */
+#define UIF_CHECK_CD        ((__force uif_t) (1 << 25))
+#define UIF_CTS_FLOW        ((__force uif_t) (1 << 26))
+#define UIF_NORMAL_ACTIVE    ((__force uif_t) (1 << 29))
+#define UIF_INITIALIZED        ((__force uif_t) (1 << 31))
+#define UIF_SUSPENDED        ((__force uif_t) (1 << 30))
+    int                     blocked_open;
+    struct tasklet_struct   tlet;
+    wait_queue_head_t       open_wait;
+    wait_queue_head_t       delta_msr_wait;
+};
+3)	uart_ops
+  uart_ops涵盖了串口驱动可对串口设备进行的所有操作。
+/*
+ * This structure describes all the operations that can be
+ * done on the physical hardware.
+ */
+struct uart_ops {
+    unsigned int (*tx_empty)(struct uart_port *); /* 串口的Tx FIFO缓存是否为空 */
+    void         (*set_mctrl)(struct uart_port *, unsigned int mctrl); /* 设置串口modem控制 */
+    unsigned int (*get_mctrl)(struct uart_port *); /* 获取串口modem控制 */
+    void         (*stop_tx)(struct uart_port *); /* 禁止串口发送数据 */
+    void         (*start_tx)(struct uart_port *); /* 使能串口发送数据 */
+    void         (*send_xchar)(struct uart_port *, char ch);/* 发送xChar */
+    void         (*stop_rx)(struct uart_port *); /* 禁止串口接收数据 */
+    void         (*enable_ms)(struct uart_port *); /* 使能modem的状态信号 */
+    void         (*break_ctl)(struct uart_port *, int ctl); /* 设置break信号 */
+    int          (*startup)(struct uart_port *); /* 启动串口,应用程序打开串口设备文件时,该函数会被调用 */
+    void         (*shutdown)(struct uart_port *); /* 关闭串口,应用程序关闭串口设备文件时,该函数会被调用 */
+    void         (*set_termios)(struct uart_port *, struct ktermios *new, struct ktermios *old); /* 设置串口参数 */
+    void         (*pm)(struct uart_port *, unsigned int state,
+             unsigned int oldstate); /* 串口电源管理 */
+    int          (*set_wake)(struct uart_port *, unsigned int state); /*  */
+    const char  *(*type)(struct uart_port *); /* 返回一描述串口类型的字符串 */
+    void         (*release_port)(struct uart_port *); /* 释放串口已申请的IO端口/IO内存资源,必要时还需iounmap */
+    int          (*request_port)(struct uart_port *); /* 申请必要的IO端口/IO内存资源,必要时还可以重新映射串口端口 */
+    void         (*config_port)(struct uart_port *, int); /* 执行串口所需的自动配置 */
+    int          (*verify_port)(struct uart_port *, struct serial_struct *); /* 核实新串口的信息 */
+    int          (*ioctl)(struct uart_port *, unsigned int, unsigned long); /* IO控制 */
+};
+3.2串口驱动API
+4)	uart_register_driver
+/* 功能：    uart_register_driver用于将串口驱动uart_driver注册到内核(串口核心层)中，通常在模块初始化函数调用该函数。
+ * 参数 drv：要注册的uart_driver
+ * 返回值：  成功，返回0；否则返回错误码
+ */
+int uart_register_driver(struct uart_driver *drv)
+5)	uart_unregister_driver
+/* 功能：    uart_unregister_driver用于注销我们已注册的uart_driver，通常在模块卸载函数调用该函数
+ * 参数 drv：要注销的uart_driver
+ * 返回值：  成功，返回0；否则返回错误码
+ */
+void uart_unregister_driver(struct uart_driver *drv)
+6)	uart_add_one_port
+/* 功能：    uart_add_one_port用于为串口驱动添加一个串口端口，通常在探测到设备后(驱动的设备probe方法)调用该函数
+ * 参数 drv：串口驱动
+ *      port:要添加的串口端口
+ * 返回值：  成功，返回0；否则返回错误码
+ */
+int uart_add_one_port(struct uart_driver *drv, struct uart_port *port)
+7)	uart_remove_one_port
+/* 功能：     uart_remove_one_port用于删除一个已添加到串口驱动中的串口端口，通常在驱动卸载时调用该函数
+ * 参数 drv： 串口驱动
+ *      port: 要删除的串口端口
+ * 返回值：   成功，返回0；否则返回错误码
+ */
+int uart_remove_one_port(struct uart_driver *drv, struct uart_port *port)
+8)	uart_write_wakeup
+/* 功能：     uart_write_wakeup唤醒上层因向串口端口写数据而阻塞的进程，通常在串口发送中断处理函数中调用该函数
+ * 参数 port：需要唤醒写阻塞进程的串口端口
+ */
+void uart_write_wakeup(struct uart_port *port)
+9)	uart_suspend_port
+/* 功能：     uart_suspend_port用于挂起特定的串口端口
+ * 参数 drv： 要挂起的串口端口所属的串口驱动
+ *      port：要挂起的串口端口
+ * 返回值：   成功返回0；否则返回错误码
+ */
+int uart_suspend_port(struct uart_driver *drv, struct uart_port *port)
+10)	uart_resume_port
+/* 功能：     uart_resume_port用于恢复某一已挂起的串口
+ * 参数 drv： 要恢复的串口端口所属的串口驱动
+ *      port：要恢复的串口端口
+ * 返回值：   成功返回0；否则返回错误码
+ */
+int uart_resume_port(struct uart_driver *drv, struct uart_port *port)
+11)	uart_get_baud_rate
+/* 功能：        uart_get_baud_rate通过解码termios结构体来获取指定串口的波特率
+ * 参数 port：  要获取波特率的串口端口
+ *     termios：当前期望的termios配置(包含串口波特率)
+ *     old：    以前的termios配置，可以为NULL
+ *     min：    可接受的最小波特率
+ *     max：    可接受的最大波特率
+ * 返回值：     串口的波特率
+ */
+unsigned int
+uart_get_baud_rate(struct uart_port *port, struct ktermios *termios,
+     struct ktermios *old, unsigned int min, unsigned int max)
+12)	uart_get_divisor
+/* 功能：     uart_get_divisor用于计算某一波特率的串口时钟分频数（串口波特率除数）
+ * 参数 port：要计算时钟分频数的串口端口
+ *      baud：期望的波特率
+ *返回值：    串口时钟分频数
+ */
+unsigned int uart_get_divisor(struct uart_port *port, unsigned int baud)
+13)	uart_update_timeout
+/* 功能：      uart_update_timeout用于更新（设置）串口FIFO超时时间
+ * 参数 port： 要更新超时时间的串口端口
+ *     cflag：termios结构体的cflag值
+ *     baud： 串口的波特率
+ */
+void uart_update_timeout(struct uart_port *port, unsigned int cflag, unsigned int baud)
+14)	uart_match_port
+/* 功能：uart_match_port用于判断两串口端口是否为同一端口
+ * 参数 port1、port2：要判断的串口端口
+ * 返回值：不同返回0；否则返回非0
+ */
+int uart_match_port(struct uart_port *port1, struct uart_port *port2)
+15)	uart_console_write
+/* 功能：        uart_console_write用于向串口端口写一控制台信息
+ * 参数 port:    要写信息的串口端口
+ *     s:       要写的信息
+ *     count:   信息的大小
+ *     putchar: 用于向串口端口写字符的函数，该函数函数有两个参数：串口端口和要写的字符
+ */
+void uart_console_write(struct uart_port *port, const char *s,
+            unsigned int count,
+            void (*putchar)(struct uart_port *, int))
+四. 调试记录
+4.1驱动的动态加载及配置
+ 1) 首先进入/drivers/tty/serial/8250/ 目录下，打开Kconfig配置文件，将文本选项config SERIAL_8250_EXAR_ST16C554 下的depends on SERIAL_8250 != n && ISA && SERIAL_8250_MANY_PORTS 更改为depends on SERIAL_8250 != n(即去掉后面两个条件)
+ 2) 执行make menuconfig 命令进入配置菜单，进入Serial drivers目录下，配置图:
+ 图13 配置界面
+4.2驱动代码修改
+  1) drivers/tty/serial/8250/8250_exar_st16c554.c文件修改
+   #define PORT(_base,_irq)内容改为：
+   #define PORT(_base,_irq)				\
+	{						\
+		.mapbase		= _base,		\
+		.irq		      = _irq,			\
+		.uartclk	     =  14745600,		\
+		.iotype	     = UPIO_MEM,		\
+		.regshift	     = 2,               \
+		.irqflags = (IRQF_TRIGGER_HIGH | IRQF_SHARED),\
+		.flags	     = (UPF_BOOT_AUTOCONF|UPF_IOREMAP),	\
+	  }
+  .mapbase表示地址映射，且为物理地址;
+  .uartclk表示xr16c854中外部晶振的实际数值；
+  .regshift	= 2表示32位地址中低两位不可用；
+ .irqflags = (IRQF_TRIGGER_HIGH | IRQF_SHARED)表示触发中断类型和中断共享打 开；
+  static struct plat_serial8250_port exar_data[]内容更改如下：
+  static struct plat_serial8250_port exar_data[] = {
+	PORT(0x43c20020, 61),
+	PORT(0x43c20040, 62),
+	PORT(0x43c20060, 63),
+	PORT(0x43c20080, 64),
+	
+	{ },
+};
+注：0x43c20020表示地址，61表示相应的中断号；
+2) drivers/tty/serial/8250/8250_core.c文件修改
+  波特率的修改,将下面蓝色字体代码注释掉：
+ 
+且替换为 quot=(port->uartclk/4)/( baud  *16); 
+ 3) 中断服务程序unsigned char serial8250_rx_chars(struct uart_8250_port *up, unsigned char lsr)的修改：
+while ((lsr & (UART_LSR_DR | UART_LSR_BI)) && (max_count-- > 0) &&  !(iir & UART_IIR_NO_INT));且在函数中定义unsigned char iir; iir = serial_in(up, UART_IIR);
+总结：
+    在动手调试之前，应该弄懂芯片的工作的原理，总线的工作原理，前期就应该把总线的地址协商好，确定好，最好有个书面的文档，避免在开发期间更改这些东西。在调试总线时不要急于求成，应该确保总线可以正常访问，读写数据都正确后，在去放到LINUX驱动开发框架中去搞。一定要明白芯片每一寄存器的具体含义，熟悉代码的流程，可以使用二分法等手段去定位问题，像这种串行的问题可以逐级排查，一步步找到出问题的根源。在跨部门联调时，前期最好把相应的地址，接口函数确定好，最好有书面文档，这样做有两个好处，一个是两边可以同时开发，加快开发进度；另一个是防止某一方在中途擅自更改某些参数，影响开发进度。

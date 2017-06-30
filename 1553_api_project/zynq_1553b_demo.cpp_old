@@ -1,0 +1,236 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "zynq_1553b_api.h"
+#include "actel1553io.h"
+#include <iostream>
+using namespace std;
+
+ FILE *fp;
+ 
+#define     YES     1  
+#define     NO      0 
+
+int my_atoi(char s[])  
+{  
+   int hexdigit, i, inhex, n;  
+   i = 0;  
+  
+  if(s[i] == '0')   //如果字符串以0x或0X开头，则跳过这两个字符  
+  {  
+      ++i;  
+       if(s[i] == 'x' || s[i] == 'X')    
+           ++i;  
+  }
+   else
+  {
+     n = atoi(s);
+     return n;
+   }
+
+   n = 0;  
+   inhex = YES;            //如果字符是有效16进制字符，则置inhex为YES  
+   for(; inhex == YES; ++i)  
+   {  
+       if(s[i] >= '0' && s[i] <= '9')  
+          hexdigit = s[i] - '0';  
+       else if(s[i] >= 'a' && s[i] <= 'f')  
+           hexdigit = s[i] - 'a' + 10;  
+       else if(s[i] >= 'A' && s[i] <= 'F')  
+           hexdigit = s[i] - 'A' + 10;  
+       else  
+           inhex = NO;  
+       if(inhex == YES)  
+           n = n * 16 + hexdigit;  
+    }  
+ 
+    return n;  
+}  
+
+void DisplayDecodedMsg(stmsg_struct *pMsg)
+{
+    unsigned short  i,cnt = 0;
+
+    if(pMsg->stswrd)
+    {
+         printf("CMD: 0x%04X           %02d-%02d-%c-%02d           Stat: 0x%04X\n",pMsg->cmdwrd,pMsg->iaddrs, pMsg->subaddr,pMsg->trflag?'T':'R',pMsg->datalen, pMsg->stswrd);
+	 }
+	 else
+	 {
+         printf("CMD: 0x%04X            %02d-%02d-%c-%02d\n",pMsg->cmdwrd,pMsg->iaddrs, pMsg->subaddr,pMsg->trflag?'T':'R',pMsg->datalen);
+	 }
+    
+    /* Display Data words */
+    for(i=0; i<pMsg->datalen; i++)
+    {
+       if(0 == i)
+       {
+			  printf("%s","Data:");
+		 }
+       printf("%04x    ",pMsg->datawrd[i]);
+		cnt ++;
+       if(!(cnt%8))
+       {
+          printf("\n     "); 
+       }			
+    }
+    printf("\n\n");
+
+}
+
+int main(int argc, char* argv[])
+{
+     int ret = RET_OK;
+     char ch;
+	  char buf[120];
+
+	 if(!strcmp(argv[1], "rt"))
+	 {
+        ret = zynq_rt_set_config("RTConf.dat");
+		 ret += zynq_rt_init();
+		 zynq_rt_ioctl(6, ENUM_MSG_SAVE, "/mnt/rtdata");
+
+		 zynq_reg_func(DisplayDecodedMsg);
+		 //zynq_rt_msg_write(1, buf, 64);
+		 
+	    ret += zynq_rt_start();
+		 for(int i = 0; i < 120; i++)
+	    {
+         		buf[i] = i;
+	     }
+		 while(1)
+		 {
+		      printf("Please input  'q'(quit)!\n");
+			   ch = getchar();
+		      if(ch == 'q')
+		      {
+		          	ret += zynq_rt_stop();
+		          break;
+		      }
+			  else if(ch == 'm')
+			  { 
+				  zynq_rt_msg_write(1, buf, 120);
+			  }
+			  else if(ch == 'd')
+		      {
+		          unsigned short  addr, count;
+
+		          printf("->Please input ram address and count! Example: ->10  2\n->");
+
+		          if(cin>>addr>>count)
+		          {
+		              printf("addr = %d, count = %d \n", addr, count);
+
+		              showRam(addr, count);
+		          }
+			  }	
+
+		      sleep(1);
+	 		}
+	 }
+	 else if(!strcmp(argv[1], "mt"))
+	 {
+		  ret = zynq_mt_init();
+		  printf("zynq_mt_init ok\n");
+		  ret += zynq_mt_msg_save("mnt_log.txt");
+         ret += zynq_mt_start();	
+		  while(1)
+		  {
+				printf("Please input  'q'(quit)!\n");
+			   ch = getchar();
+		      if(ch == 'q')
+		      {
+                 break;
+		      }
+			   else if(ch == 'd')
+		      {
+		          unsigned short addr, count;
+
+		          printf("->Please input ram address and count! Example: ->10  2\n->");
+
+		          if(cin>>addr>>count)
+		          {
+		              printf("addr = %d, count = %d \n", addr, count);
+
+		              showRam(addr, count);
+		          }
+			  }
+			  sleep(1);
+		  }
+		  ret += zynq_mt_stop();
+	 }
+	 else if(!strcmp(argv[1], "bc"))
+	 {
+          ret = zynq_bc_set_config("BCConf.dat");
+			ret += zynq_bc_init();
+			zynq_reg_func(DisplayDecodedMsg);
+			ret  += zynq_bc_start();
+			while(1)
+			{
+               printf("Please input  'q'(quit)!\n");
+			     ch = getchar();
+		        if(ch == 'q')
+		        {
+		            break;
+		        }
+				 else if(ch == 'd')
+		       {
+			          unsigned short addr, count;
+
+			          printf("->Please input ram address and count! Example: ->10  2\n->");
+
+			          if(cin>>addr>>count)
+			          {
+			              printf("addr = %d, count = %d \n", addr, count);
+
+			              showRam(addr, count);
+			          }
+			    }
+				 else if(ch == 'm')
+				 {
+                     ctl_data_wrd_info msg_info;
+						 int i;
+					    msg_info.type = ENUM_MODIFY_MSG;
+						 msg_info.msg_id = 1;
+						 msg_info.pos = 4;
+						 msg_info.msg_lenth = 5;
+						 msg_info.data = new char[5];
+				        for(i = 0; i < 5; i++)
+				        {
+       						msg_info.data[i] = i+10;
+						 }
+						
+						 zynq_bc_msg_write(&msg_info);
+						 delete msg_info.data;
+				 	} 
+				   else if(ch == 's')
+				   {
+                     ctl_data_wrd_info msg_info;
+					    msg_info.type = ENUM_DEL_MSG;
+						 msg_info.msg_id = 1;
+						 zynq_bc_msg_write(&msg_info);
+				 	}
+					else if(ch == 'a')
+				   {
+				       int i;
+                     ctl_data_wrd_info msg_info;
+					    msg_info.type = ENUM_ADD_MSG;
+						 msg_info.msg_id = 1;
+						 msg_info.msg_id = 1;
+						 msg_info.msg_lenth = 60;
+						 msg_info.data = new char[60];
+						  for(i = 0; i < 60; i++)
+				        {
+       						msg_info.data[i] = i;
+						 }
+						 zynq_bc_msg_write(&msg_info);
+						 delete msg_info.data;
+				 	} 
+					 
+	           sleep(1);
+			}
+			ret += zynq_bc_stop();
+	 }
+
+     return ret;
+}

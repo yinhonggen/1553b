@@ -1,0 +1,1952 @@
+/**
+* common_bc.cpp
+* 通用1553BC
+*
+*    \date 2012/9/1
+*  \author luxiaoqing
+*/
+
+#include "zhh_1553b_main_test.h"
+#include "actel1553io.h"
+
+#ifdef WIN32
+//#include "../dll1553BC/stdafx.h"
+#endif
+#include "common_bc.h"
+#ifdef IPCORE
+#include "IPCORE.h"
+#endif
+#ifdef ALL_MODE
+#include "ISR.h"
+#endif
+#ifdef __vxworks
+#include "sys/times.h" 
+#include "logLib.h"
+#endif
+#include <sstream>
+#include <fcntl.h>
+#include <sys/stat.h>
+#ifndef WIN32
+#include <unistd.h>
+#endif
+#ifdef WIN32
+#include <io.h>
+#endif
+
+#if  (!defined WIN32)||(defined __linux__)
+#define logMsg(a,b,c,d,e,f,g) printf(a,b,c,d,e,f,g);
+#endif
+
+/// 静态初始化
+S16BIT BC_Ops::s_op_id = 400;
+
+/// 大帧id
+const int BrAda1553B_BC_COMM::MAJOR_FRAME_ID = 32767;
+BOOL BC_Adapter_changeEndian;
+BrAda1553B_BC_COMM* p_AdaBC = NULL;
+static WORD qiu_reg1_val;
+/// 此函数主要用于处理1553B的数据。其作用就是将制定缓冲中的数据按字进行颠倒，如果缓冲的长度不是2的整数倍，则不处理尾部的数据
+inline void swap_by_word(char *buf, size_t size)
+{
+	if (!buf || size <= 0) return;
+	size_t swap_size = size /2 * 2;
+	for (size_t i = 0 ; i < swap_size - 1 ; i+=2)
+	{
+		*(buf + i) ^= *(buf + i + 1);
+		*(buf + i + 1) ^= *(buf + i);
+		*(buf + i) ^= *(buf + i + 1);
+	}
+}
+
+void SetTimecodeForAsync(WORD msgNO, WORD* data){
+	if (!p_AdaBC || !p_AdaBC->m_sys_service || !data){
+		return;
+	}
+
+	if (p_AdaBC->m_mapID.find(msgNO) != p_AdaBC->m_mapID.end()){
+		WORD index = p_AdaBC->m_mapID[msgNO];
+		if (p_AdaBC->m_vec_msg[index].isTimeCode)
+		{
+			/* zhanghao close.
+			BrTimeTriple now;
+			p_AdaBC->m_sys_service->get_system_time(now);
+			int64_t shiptime = now.tm_ship_time / 1000;
+
+			data[0] = (shiptime & 0xFFFFFFFF) >> 16;
+			data[1] =  shiptime & 0x0000FFFF;
+			swap_by_word((char*)data, 4);
+			*/
+		}
+	} 
+}
+
+/// CRC码表
+WORD CRCTable[256] = {0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
+0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef,
+0x1231, 0x0210, 0x3273, 0x2252, 0x52b5, 0x4294, 0x72f7, 0x62d6,
+0x9339, 0x8318, 0xb37b, 0xa35a, 0xd3bd, 0xc39c, 0xf3ff, 0xe3de,
+0x2462, 0x3443, 0x0420, 0x1401, 0x64e6, 0x74c7, 0x44a4, 0x5485,
+0xa56a, 0xb54b, 0x8528, 0x9509, 0xe5ee, 0xf5cf, 0xc5ac, 0xd58d,
+0x3653, 0x2672, 0x1611, 0x0630, 0x76d7, 0x66f6, 0x5695, 0x46b4,
+0xb75b,	0xa77a,	0x9719,	0x8738,	0xf7df,	0xe7fe,	0xd79d,	0xc7bc,
+0x48c4,	0x58e5,	0x6886,	0x78a7,	0x0840,	0x1861,	0x2802,	0x3823,
+0xc9cc,	0xd9ed,	0xe98e,	0xf9af,	0x8948,	0x9969,	0xa90a,	0xb92b,
+0x5af5,	0x4ad4,	0x7ab7,	0x6a96,	0x1a71,	0x0a50,	0x3a33,	0x2a12,
+0xdbfd,	0xcbdc,	0xfbbf,	0xeb9e,	0x9b79,	0x8b58,	0xbb3b,	0xab1a,
+0x6ca6,	0x7c87,	0x4ce4,	0x5cc5,	0x2c22,	0x3c03,	0x0c60,	0x1c41,
+0xedae,	0xfd8f,	0xcdec,	0xddcd,	0xad2a,	0xbd0b,	0x8d68,	0x9d49,
+0x7e97,	0x6eb6,	0x5ed5,	0x4ef4,	0x3e13,	0x2e32,	0x1e51,	0x0e70,
+0xff9f, 0xefbe,	0xdfdd,	0xcffc,	0xbf1b,	0xaf3a,	0x9f59,	0x8f78,
+0x9188,	0x81a9,	0xb1ca,	0xa1eb,	0xd10c,	0xc12d,	0xf14e,	0xe16f,
+0x1080,	0x00a1,	0x30c2,	0x20e3,	0x5004,	0x4025,	0x7046,	0x6067,
+0x83b9,	0x9398,	0xa3fb,	0xb3da,	0xc33d,	0xd31c,	0xe37f,	0xf35e,
+0x02b1,	0x1290,	0x22f3,	0x32d2,	0x4235,	0x5214,	0x6277,	0x7256,
+0xb5ea,	0xa5cb,	0x95a8,	0x8589,	0xf56e,	0xe54f,	0xd52c,	0xc50d,
+0x34e2,	0x24c3,	0x14a0,	0x0481,	0x7466,	0x6447,	0x5424,	0x4405,
+0xa7db,	0xb7fa,	0x8799,	0x97b8,	0xe75f,	0xf77e,	0xc71d,	0xd73c,
+0x26d3,	0x36f2,	0x0691,	0x16b0,	0x6657,	0x7676,	0x4615,	0x5634,
+0xd94c,	0xc96d,	0xf90e,	0xe92f, 0x99c8,	0x89e9,	0xb98a,	0xa9ab,
+0x5844,	0x4865,	0x7806,	0x6827,	0x18c0,	0x08e1,	0x3882,	0x28a3,
+0xcb7d,	0xdb5c,	0xeb3f,	0xfb1e,	0x8bf9,	0x9bd8,	0xabbb,	0xbb9a,
+0x4a75,	0x5a54,	0x6a37,	0x7a16,	0x0af1,	0x1ad0,	0x2ab3,	0x3a92,
+0xfd2e,	0xed0f,	0xdd6c,	0xcd4d,	0xbdaa,	0xad8b,	0x9de8,	0x8dc9,
+0x7c26,	0x6c07,	0x5c64,	0x4c45,	0x3ca2,	0x2c83,	0x1ce0,	0x0cc1,
+0xef1f,	0xff3e,	0xcf5d,	0xdf7c,	0xaf9b,	0xbfba,	0x8fd9,	0x9ff8,
+0x6e17,	0x7e36,	0x4e55,	0x5e74,	0x2e93,	0x3eb2,	0x0ed1,	0x1ef0
+};
+#define	CRC16_INIT	0x0000
+
+#ifndef BYTE 
+#define BYTE unsigned char 
+#endif
+WORD CalCRC16_BC(BYTE *pbDataBuf, DWORD dwNumOfBytes, const WORD *pwCRCTable)
+{
+	BYTE	bData = 0;
+	WORD	wCRC = CRC16_INIT;	// CRC校验码
+
+	while ( 0 != (dwNumOfBytes--) )
+	{
+		bData = (BYTE)(wCRC >> 8);				// 以8位二进制数的形式暂存wCRC的高8位
+		wCRC <<= 8;								// 左移8位，相当于wCRC的低8位乘以2的8次方
+		wCRC = wCRC ^ pwCRCTable[bData ^ (*pbDataBuf)];	// 高8位和当前字节相加后再查表求wCRC，再加上以前的wCRC
+		pbDataBuf++;
+	}	
+	return	wCRC;
+}
+
+/// 类的动态注册
+//zhanghao close.  GIST::DynaClass<BrAda1553B_BC_COMM, Agent::IDevBase> BrAda1553B_BC_COMM::s_class_reg("Adapter.1553B.IPCORE.BC");
+
+std::map<S16BIT, BrAda1553B_BC_COMM*> BrAda1553B_BC_COMM::s_adapt;
+
+/*           
+* 构造函数
+*  
+**/
+BC_Msg::BC_Msg():GPF(ACE_CNDTST_ALWAYS),
+				m_irqCount(0),
+				m_missFreq(0),
+				//m_parser(NULL),
+				//m_block(NULL),
+				m_buff(NULL),
+				m_buffSize(0),
+				m_packCount(0),
+				m_pbuff(NULL),
+				m_CRCBuff(NULL),
+				m_CRCBuffSize(0),
+				m_isBrokenMode(FALSE){
+
+}
+
+/*           
+* 析构函数
+*  
+**/
+BC_Msg::~BC_Msg(){
+	/* zhanghao close.
+	if (!m_parser)
+	{
+		delete m_parser;
+		m_parser = NULL;
+	}
+	*/
+
+	if (isFromFile && isCheckCRC && CRCTiming == 1 && m_CRCBuff)
+	{
+		delete [] m_CRCBuff;
+		m_CRCBuff = NULL;
+	}
+	if (isFromFile && m_buff)
+	{
+		delete [] m_buff;
+		m_buff = NULL;
+	}
+}
+
+/*           
+* 初始化时间码消息所需的信息,每次实验只会在开始时调用一次
+*  
+**/
+/* zhanghao close.
+void BC_Msg::InitTimecode(const ICDMan* icdman, const Interface* ref_if){
+	if (!isTimeCode || !icdman || !ref_if){
+		return;
+	}
+
+	char dest_addr[8];
+	char dest_subaddr[8];
+
+	sprintf(dest_addr, "%d", Addr[2]);
+	sprintf(dest_subaddr, "%d", Addr[3]);
+
+	if ( ref_if ) {
+		std::vector<ICD::Routing *> routings = const_cast<ICDMan*>(icdman)->MatchRoutes(const_cast<Interface*>(ref_if),
+			"TimeCode", "", dest_addr, dest_subaddr);
+		if ( routings.size() >= 1 ){
+			BlockAttr * blockAttr = const_cast<ICDMan*>(icdman)->GetBlock(routings[0]);
+			m_block = const_cast<ICDMan*>(icdman)->GetBlock(blockAttr);
+		}
+	}
+	if (m_block)
+	{
+		m_parser = new BrBasicParser(const_cast<ICDMan*>(icdman), m_block, (char*)data, 64);
+	}
+}
+*/
+
+/*           
+* 设置时间码参数到data中
+*  
+**/
+/* zhanghao close.
+void BC_Msg::SetTimecode(Agent::ISysServ *svr){
+	if (!isTimeCode || !m_block || !m_parser || !svr){
+		return;
+	}
+
+	try
+	{
+		BrTimeTriple now;
+		svr->get_system_time(now);
+		BrVariant var_shiptime;
+		var_shiptime.set((int64_t)now.tm_ship_time);
+		const ICDMan* icdman = svr->get_icd();
+		ICDMan::MemNode::iterator itMem = icdman->GetMembers(m_block);
+		for( ; itMem != ICDMan::MemNode::end(); itMem++ ){
+			Field *field = itMem->GetField();
+			Parameter *para = field->GetParamPtr();
+			if (para->GetParamType() == "BusRobot.ICD.Parameter.Type.TimeBase"){
+				(*m_parser)[para] = var_shiptime;
+			}
+		}
+	}
+	catch (std::exception& e)
+	{
+		printf("BC_Msg::SetTimecode:[exception]%s\n", e.what());
+	}
+
+	//方式命令只能发一个字，根据项目要求，发低16位
+	if (type == MSG_MODE_CODE || type == MSG_MODE_CODE_BROADCAST)
+	{
+		data[0] = data[1];
+	}
+}
+*/
+
+/*           
+* 设置从文件读出的数据到data
+*  
+**/
+void BC_Msg::SetFileData(){
+	if (!isFromFile){
+		return;
+	}
+	m_packCount++;
+//	memset(data, defaultValue, 64);
+	for(int i=0; i<32; i++){
+		data[i] = defaultValue;
+	}
+	if (m_buffSize == 0 || length == 0){
+		return;
+	}
+	int tempLen = length;
+	int offset = 0;  //本条消息要发的文件缓存里字数，在文件尾只取剩余的字数
+
+	//不校验
+	if(!isCheckCRC){
+		//小包的最后一条消息
+		if ( packLen%tempLen != 0 && m_packCount % (packLen/tempLen+1) == 0 )
+		{
+			offset = packLen%tempLen;
+		}
+		//小包的非最后一条消息
+		else{
+			offset = tempLen;
+		}
+	}
+	//消息校验
+	else if (isCheckCRC && CRCTiming == 0){
+		tempLen = tempLen - 1;
+		if (tempLen == 0){
+			return;
+		}
+		//小包的最后一条消息
+		if ( packLen%tempLen != 0 && m_packCount % (packLen/tempLen+1) == 0 )
+		{
+			offset = packLen%tempLen;
+		}
+		//小包的非最后一条消息
+		else{
+			offset = tempLen;
+		}
+	}
+	//包校验
+	else if(isCheckCRC && CRCTiming == 1){
+		//小包的最后一条消息还有写校验码位置的情况
+		if ( packLen%tempLen != 0 ){
+			//小包的最后一条消息
+			if ( m_packCount % (packLen/tempLen+1) == 0 )
+			{
+				offset = packLen%tempLen;
+			}
+			//小包的非最后一条消息
+			else{
+				offset = tempLen;
+			}
+		}
+		else{
+			//只写小包校验码的消息，最后一条
+			if ( m_packCount % (packLen/tempLen + 1) == 0  )
+			{
+				offset = 0;
+			}
+			//小包数据消息，非最后一条消息
+			else{
+				offset = tempLen;
+			}
+		}
+	}
+
+	memcpy(data, m_pbuff, offset*2);
+	m_pbuff += offset*2;
+
+	//如果读到文件缓存尾了，回到头
+	if (m_pbuff - m_buff == m_buffSize){
+		m_pbuff = m_buff;
+	}
+}
+
+/*           
+* 在消息的最后一个字设置校验和到data
+*  
+**/
+void BC_Msg::SetCRC(){
+	if (!isCheckCRC || length == 0){
+		return;
+	}
+
+	char *pData = reinterpret_cast<char*>(data);
+	DWORD len = (length - 1) * 2;
+
+	//如果是在包尾加校验
+	if (isFromFile && CRCTiming == 1)
+	{
+		short temp = m_packCount % (packLen/length+1);
+		//不是包未，退出
+		if (m_packCount % (packLen/length+1) != 0)
+		{
+			memcpy(m_CRCBuff + (temp-1)*length*2, data, length*2);
+			return;
+		}else{
+			memcpy(m_CRCBuff + (packLen/length)*length*2, data, length*2);
+			pData = m_CRCBuff;
+//			len = m_CRCBuffSize - 2;
+			len = packLen * 2;
+		}
+	}
+
+	//累加和
+	if (CRCMode == 0)
+	{
+		S16BIT sum = 0;
+		for (U32BIT i=0;i<(len/2);i++)
+		{
+			sum += *(reinterpret_cast<U16BIT*>(pData) + i);
+		}
+		data[length-1] = sum;
+	}
+	//CRC
+	else if(CRCMode == 1)
+	{
+		U16BIT wCRC = CalCRC16_BC((BYTE*)pData,len,CRCTable);
+
+		data[length-1] = wCRC;
+	}
+}
+
+/*           
+* 设置发出数据的内容
+*  
+**/
+void BC_Msg::SetBCData(S16BIT numCard, Agent::ISysServ *svr){
+	if (isFromFile)
+	{
+		SetFileData();
+	}
+	if (isTimeCode)
+	{
+		//SetTimecode(svr); zhanghao close.
+	}
+	if (isCheckCRC)
+	{
+		SetCRC();
+	}
+	if ( (isFromFile || isTimeCode || isCheckCRC) && sendTiming != SENDTIMING_DUP )
+	{
+		//修改数据块内容
+		aceBCDataBlkWrite( numCard, blkid, data, 32, 0 );
+	}
+}
+
+/*           
+* 载入仿真文件
+*  
+**/
+void BC_Msg::loadSimFile(){
+	if (!isFromFile){
+		return;
+	}
+	if (isCheckCRC && CRCTiming == 1)
+	{
+		m_CRCBuffSize = 2 * (packLen + length - packLen%length);
+		m_CRCBuff = new char[m_CRCBuffSize];
+		if (!m_CRCBuff){
+			std::cout << "new m_CRCBuff failed.\n";
+			return;
+		}
+	}
+	char filepath[160];
+	sprintf(filepath, "agent.rc/BC_SimFile/%s", filename);
+	int retry_num = 3;
+	while ( --retry_num >= 0 ) {
+		struct stat file_stat;
+		if ( (stat(filepath, &file_stat) != 0 ) ) {
+			std::cout << "BC_Msg::loadSimFile(): file '" << filename << "' not found." << std::endl;
+			usleep(1);
+			continue;
+		}
+		if ( file_stat.st_size <= 0 ) {
+			std::cout << "BC_Msg::loadSimFile(): file '" << filename << "': no contents." << std::endl;
+			break;
+		}
+#ifdef WIN32
+		int fd = _open(filepath, O_RDONLY|O_BINARY, 0);
+#else
+		int fd = open(filepath, O_RDONLY, 0);
+#endif
+		if ( fd == -1 ) {
+			std::cerr << "open file '" << filename << "' failed: " << errno << std::endl;
+			usleep(1);
+			continue;
+		}
+		int filesize = file_stat.st_size;
+		std::cout << "file[" << filename << "] size is " << filesize << " bytes." << std::endl;
+		//整理文件缓存，将最后一个包填完整
+		m_buffSize = filesize;
+		int temp = m_buffSize%(2*packLen);
+		if (temp != 0){
+			m_buffSize = m_buffSize + 2*packLen - temp;
+		}
+		m_buff = new char[m_buffSize];
+		if (!m_buff){
+			std::cout << "new m_buff failed.\n";
+			close(fd);
+			return;
+		}
+		//填充默认值
+//		memset(m_buff, defaultValue, m_buffSize);
+		for(U32BIT i=0; i<(m_buffSize/2); i++){
+			memcpy(m_buff+2*i, &defaultValue, 2);
+		}
+		size_t remains = filesize;
+		char *p = m_buff;
+		// 读出数据
+		while ( remains > 0 ) {
+			int nrd = ::read(fd, p, remains);
+			if ( nrd < 0 )
+				break;
+			p += nrd;
+			remains -= nrd;
+		}
+		if ( remains > 0 ) { // error, load failed!
+			close(fd);
+			delete []m_buff;
+			m_buff = NULL;
+			std::cerr << "BC_Msg::loadSimFile(): '" << filename << "' error: " << errno << std::endl;
+			usleep(1);
+			continue;
+		}
+		if(BC_Adapter_changeEndian){
+			swap_by_word(m_buff, filesize);
+		}
+		//初始化m_pbuff指针。
+		m_pbuff = m_buff;
+		close(fd);
+		break;
+	}
+
+}
+
+/*           
+ * 创建当前消息
+ *  
+**/
+void BC_Msg::Create(S16BIT numCard) {
+	if (length > 32){
+		printf("[BC_Msg::Create](warning)invalid length. messID is %d.\n", id);
+		length = 32;
+	}
+
+	//创建当前消息的数据区
+	U16BIT wTemp[64];
+	memset(wTemp, 0, 64);
+	if (data && length) {
+		memcpy(wTemp, data, length*2);
+	}
+
+	S16BIT nResult = 0;
+	//异步消息不创建blk，而是将wTemp直接作为参数传给了BCCreateXX函数
+	if(!isAsync){
+		nResult = aceBCDataBlkCreate(numCard, blkid, 32, wTemp, 32);
+		if (nResult) {
+			logMsg("[BC_Msg::Create][ERROR] aceBCDataBlkCreate failed.\r\n", 0,
+					0, 0, 0, 0, 0);
+		}
+	}
+
+	
+	U32BIT nowOpt = GetOpt();
+	U16BIT tempTR = ACE_TX_CMD;
+	short addr1 = Addr[0];
+	short addr2 = Addr[1];
+	Addr[2] = 0x1f;
+	if (!isAsync)
+	{
+		switch (type) {
+		case MSG_BROADCAST:
+			nResult = aceBCMsgCreateBcst(numCard, id, blkid, Addr[3], length,
+				gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateBcst failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_BC_TO_RT:
+			nResult = aceBCMsgCreateBCtoRT(numCard, id, blkid, Addr[2],
+				Addr[3], length, gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateBCtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_RT_TO_BC:
+			nResult = aceBCMsgCreateRTtoBC(numCard, id, blkid, Addr[0],
+				Addr[1], length, gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateBCtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_RT_TO_RT:
+			nResult = aceBCMsgCreateRTtoRT(numCard, id, blkid, Addr[2],
+				Addr[3], length, Addr[0], Addr[1], gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateRTtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_MODE_CODE:
+			if (length == 0x11 || length == 0x14 || length == 0x15){
+				tempTR = ACE_RX_CMD;
+				addr1 = Addr[2];
+				addr2 = Addr[3];
+			}
+			nResult = aceBCMsgCreateMode(numCard, id, blkid, addr1,
+				tempTR, length, gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateMode failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			//默认子地址为0，若指定为31的话，改为31。
+			if (addr2 == 31){
+				U16BIT cmdword;
+				aceCmdWordCreate(&cmdword, addr1, tempTR, addr2, length);
+				nResult = aceBCMsgModify( numCard, id, blkid,0, cmdword, 0, 0, 0, 0, 0, 0, 0, ACE_BC_MOD_CMDWRD1_1 );
+				if( nResult ){
+					logMsg( "[BC_Msg::Create][ERROR] aceBCMsgModify failed.%d\n", nResult, 0, 0, 0, 0, 0 );
+				}
+			}
+			break;
+		case MSG_RT_BROADCAST:  //luxq 校对地址Addr[0], Addr[1]
+			nResult = aceBCMsgCreateBcstRTtoRT(numCard, id, blkid, Addr[3],
+				length, Addr[0], Addr[1], gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateBcstRTtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_MODE_CODE_BROADCAST:  
+			if (length == 0x11 || length == 0x14 || length == 0x15){
+				tempTR = ACE_RX_CMD;
+				addr2 = Addr[3];
+			}
+			nResult = aceBCMsgCreateBcstMode(numCard, id, blkid, tempTR,
+				length, gap_time, nowOpt);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCMsgCreateBcstMode failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			//默认子地址为0，若指定为31的话，改为31。
+			if (addr2 == 31){
+				U16BIT cmdword;
+				aceCmdWordCreate(&cmdword, 31, tempTR, addr2, length);
+				nResult = aceBCMsgModify( numCard, id, blkid,0, cmdword, 0, 0, 0, 0, 0, 0, 0, ACE_BC_MOD_CMDWRD1_1 );
+				if( nResult ){
+					logMsg( "[BC_Msg::Create][ERROR] aceBCMsgModify failed.%d\n", nResult, 0, 0, 0, 0, 0 );
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}else{
+		switch (type) {
+		case MSG_RT_TO_BC:
+			nResult = aceBCAsyncMsgCreateRTtoBC(numCard, id, blkid, Addr[0],
+				Addr[1], length, gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateRTtoBC failed.%d\r\n", nResult, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_BC_TO_RT:
+			nResult = aceBCAsyncMsgCreateBCtoRT(numCard, id, blkid, Addr[2],
+				Addr[3], length, gap_time, nowOpt, wTemp);
+			logMsg("Create Asyn Msg %d-----\r\n", id, 0, 0, 0, 0, 0);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateBCtoRT failed.%d\r\n", nResult, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_BROADCAST:
+			nResult = aceBCAsyncMsgCreateBcst(numCard, id, blkid, Addr[3], length,
+				gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateBcst failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_RT_TO_RT:
+			nResult = aceBCAsyncMsgCreateRTtoRT(numCard, id, blkid, Addr[2],
+				Addr[3], length, Addr[0], Addr[1], gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateRTtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_MODE_CODE: 
+			if (length == 0x11 || length == 0x14 || length == 0x15){
+				tempTR = ACE_RX_CMD;
+				addr1 = Addr[2];
+				addr2 = Addr[3];
+			}
+			nResult = aceBCAsyncMsgCreateMode(numCard, id, blkid, addr1,
+				tempTR, length, gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateMode failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			//默认子地址为0，若指定为31的话，改为31。
+			if (addr2 == 31){
+				U16BIT cmdword;
+				aceCmdWordCreate(&cmdword, addr1, tempTR, addr2, length);
+				nResult = aceBCMsgModify( numCard, id, blkid,0, cmdword, 0, 0, 0, 0, 0, 0, 0, ACE_BC_MOD_CMDWRD1_1 );
+				if( nResult ){
+					logMsg( "[BC_Msg::Create][ERROR] aceBCMsgModify failed.%d\n", nResult, 0, 0, 0, 0, 0 );
+				}
+			}
+			break;
+		case MSG_RT_BROADCAST: 
+			nResult = aceBCAsyncMsgCreateBcstRTtoRT(numCard, id, blkid, Addr[3],
+				length, Addr[0], Addr[1], gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateBcstRTtoRT failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			break;
+		case MSG_MODE_CODE_BROADCAST: 
+			if (length == 0x11 || length == 0x14 || length == 0x15){
+				tempTR = ACE_RX_CMD;
+				addr2 = Addr[3];
+			} 
+			nResult = aceBCAsyncMsgCreateBcstMode(numCard, id, blkid, tempTR,
+				length, gap_time, nowOpt, wTemp);
+			if (nResult) {
+				logMsg("[BC_Msg::Create][ERROR] aceBCAsyncMsgCreateBcstMode failed.\r\n", 0, 0, 0, 0, 0, 0);
+			}
+			//默认子地址为0，若指定为31的话，改为31。
+			if (addr2 == 31){
+				U16BIT cmdword;
+				aceCmdWordCreate(&cmdword, 31, tempTR, addr2, length);
+				nResult = aceBCMsgModify( numCard, id, blkid,0, cmdword, 0, 0, 0, 0, 0, 0, 0, ACE_BC_MOD_CMDWRD1_1 );
+				if( nResult ){
+					logMsg( "[BC_Msg::Create][ERROR] aceBCMsgModify failed.%d\n", nResult, 0, 0, 0, 0, 0 );
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	if (nResult)
+	{
+		BrAda1553B_BC_COMM::print_err_str(nResult);
+	}
+}
+
+void BC_Msg::Modify(S16BIT numCard){
+	U16BIT tempOpt = GetOpt();
+	if (tempOpt == nowOpt)
+	{
+		return;
+	}
+	else{
+		nowOpt = tempOpt;
+	}
+	
+	S16BIT sresult;
+
+	if (type == MSG_RT_TO_RT){
+		//MSG_RT_TO_RT时，aceBCMsgModify用起来比较复杂。
+		sresult = aceBCMsgModifyRTtoRT(numCard, id, blkid, Addr[2],
+			Addr[3], length, Addr[0], Addr[1], gap_time, tempOpt, ACE_BC_MOD_BCCTRL1);
+		if( sresult ){
+			logMsg( "[BC_Msg::Modify][ERROR] aceBCMsgModifyRTtoRT failed.%d\n", sresult, 0, 0, 0, 0, 0 );
+		}
+	} 
+	else if (type == MSG_MODE_CODE)
+	{
+		sresult = aceBCMsgModifyMode(numCard, id, blkid, 0,
+			0, 0, 0, tempOpt, ACE_BC_MOD_BCCTRL1);
+		if( sresult ){
+			logMsg( "[BC_Msg::Modify][ERROR] aceBCMsgModifyMode failed.%d\n", sresult, 0, 0, 0, 0, 0 );
+		}
+	}
+	else if (type == MSG_MODE_CODE_BROADCAST)
+	{
+		sresult = aceBCMsgModifyBcstMode(numCard, id, blkid, 0,
+			0, 0, tempOpt, ACE_BC_MOD_BCCTRL1);
+		if( sresult ){
+			logMsg( "[BC_Msg::Modify][ERROR] aceBCMsgModifyBcstMode failed.%d\n", sresult, 0, 0, 0, 0, 0 );
+		}
+	}
+	else{
+		sresult = aceBCMsgModify( numCard, id, blkid,tempOpt, 0, 0, 0, 0, 0, 0, 0, 0, ACE_BC_MOD_BCCTRL1 );
+		if( sresult ){
+			logMsg( "[BC_Msg::Modify][ERROR] aceBCMsgModify failed.%d\n", sresult, 0, 0, 0, 0, 0 );
+		}
+	}
+}
+
+/*           
+ * 获得消息的通道和重试选项
+ *  
+**/
+U16BIT BC_Msg::GetOpt() {
+	U16BIT optTemp;
+	if (channel == CHANNEL_A){
+		optTemp = ACE_BCCTRL_CHL_A;
+	} 
+	else if (channel == CHANNEL_B){
+		optTemp = ACE_BCCTRL_CHL_B;
+	} 
+	//channel == CHANNEL_AB   luxq?
+	else{  
+		if ((m_irqCount % 2) == 0){
+			optTemp = ACE_BCCTRL_CHL_A;
+		}else{
+			optTemp = ACE_BCCTRL_CHL_B;
+		}
+	}
+
+	if (isRetry)
+	{
+		optTemp |= ACE_BCCTRL_RETRY_ENA;
+	}
+	return optTemp;
+}
+
+/*   
+ * 添加操作                     
+ *   devNum:[I]通道号
+ * codeType:[I]操作码
+ *     para:[I]对应不同的操作码,有不同意义的参数
+ *  ACE_OPCODE_IRQ:para表示产生中断类型，跟ACE_IMR2_BC_UIRQ0对应
+ *  ACE_OPCODE_FLG:para表示GPF码
+ *  ACE_OPCODE_CAL:para表示小帧号
+**/
+void BC_Ops::AddOp(S16BIT devNum, S16BIT codeType, S16BIT para) {
+	S16BIT opId = GetAOpID();
+	S16BIT uRet = aceBCOpCodeCreate(devNum, opId, codeType, ACE_CNDTST_ALWAYS,
+			para, 0, 0);
+	if (uRet) {
+		throw std::runtime_error("[BC_Ops::AddOp][ERROR] aceBCOpCodeCreate failed.");
+	}
+	m_lstOps.push_back(opId);
+}
+
+/*           
+ * 添加消息
+ *    devNum:[I]通道号
+ *       msg:[I]消息
+ * condition:[I]条件码
+**/
+void BC_Ops::AddMsg(S16BIT devNum, BC_Msg& msg, S16BIT condition) {
+	S16BIT opId = GetAOpID();
+	S16BIT uRet = aceBCOpCodeCreate(devNum, opId, ACE_OPCODE_XEQ, condition,
+			msg.id, 0, 0);
+	if (uRet) {
+		throw std::runtime_error("[BC_Ops::AddMsg][ERROR] aceBCOpCodeCreate failed.");
+	}
+	m_lstOps.push_back(opId);
+}
+
+/**
+ * 添加延时
+ * \param devNum 设备代号
+ * \param interval 延时长度，单位微妙
+ * \param condition 条件代码
+ * \return void
+ */
+void BC_Ops::AddDelay(S16BIT devNum, U16BIT interval, S16BIT condition) {
+	S16BIT opId = GetAOpID();
+	S16BIT uRet = aceBCOpCodeCreate(devNum, opId, ACE_OPCODE_DLY, condition,
+			interval, 0, 0);
+	if (uRet) {
+		throw std::runtime_error("[BC_Ops::AddDelay][ERROR] aceBCOpCodeCreate failed.");
+	}
+	m_lstOps.push_back(opId);
+}
+
+S16BIT* BC_Ops::GetArrayAddr() {
+	if (m_lstOps.size() > 0) {
+		if ( !m_pOps) {
+			int iCount = m_lstOps.size();
+			m_pOps = new S16BIT[iCount];
+			for (int i = 0; i < iCount; ++i) {
+				m_pOps[i] = m_lstOps[i];
+			}
+		}
+		return m_pOps;
+	} else {
+		return NULL;
+	}
+}
+
+BrAda1553B_BC_COMM::BrAda1553B_BC_COMM() {
+	m_sys_service = NULL;
+	device_info_bc.cardNum = 0;
+	device_info_bc.interval = 0;
+	MINOR_FRAME_TIME = 320;
+	m_minorFrameCount = 0;
+	//m_interface = NULL;
+	m_isBrokenMode = FALSE;
+	BC_Adapter_changeEndian = FALSE;
+}
+
+/*
+ * 处理根据其他消息数据判断是否发送的消息
+ *
+ */
+void BrAda1553B_BC_COMM::ProcessVector(void)
+{
+	S16BIT DevNum = device_info_bc.cardNum;
+	MSGSTRUCT Msg;
+	
+	typedef std::multimap<S16BIT, S16BIT>::iterator itr;
+	std::pair<itr, itr> pos;
+	
+	for(set<S16BIT>::iterator it = m_set_followMsgID.begin(); it != m_set_followMsgID.end(); it++){
+#ifndef IPCORE //IPCORE中，异步消息是延时发送的，所以不能在RecvAsyncMsg中被及时收回来
+		//不处理异步消息，在RecvAsyncMsg中处理
+		S16BIT index = m_mapID[*it];
+		if (m_vec_msg[index].isAsync){
+			continue;
+		}
+#endif
+		while (1) {
+			S16BIT res_vector = aceBCGetMsgFromIDDecoded(DevNum, *it,
+					&Msg, TRUE);
+			if(res_vector <= 0){break;}
+				
+			pos = m_multimap_followMsg.equal_range(*it);
+			for(; pos.first != pos.second; pos.first++){
+				BC_Msg* pBCmsg = &(m_vec_msg[pos.first->second]);
+				//如果不检查服务请求位，或者检查服务请求位被设上
+				if (!pBCmsg->isCheckSrvbit || (Msg.wStsWrd1Flg > 0 && (Msg.wStsWrd1 & 0x0100) > 0)) {
+					U16BIT wVectorData = Msg.aDataWrds[pBCmsg->followDataindex-1];
+					//如果数据字与上判断mask的值等于判断值，发送消息
+					if((wVectorData & pBCmsg->followMask) == pBCmsg->followValue){
+						//同步消息
+						if(!pBCmsg->isAsync){ 
+							if (!pBCmsg->m_isBrokenMode){
+								pBCmsg->SetBCData(device_info_bc.cardNum, m_sys_service);
+							}
+							pBCmsg->Modify(device_info_bc.cardNum);
+							aceBCSetGPFState(DevNum, pBCmsg->GPF, ACE_GPF_SET);
+						}
+						//异步消息
+						else{  
+#ifndef IPCORE
+							pBCmsg->Create(device_info_bc.cardNum);
+#endif
+							if (!pBCmsg->m_isBrokenMode){
+								pBCmsg->SetBCData(device_info_bc.cardNum, m_sys_service);
+							}
+#ifdef IPCORE
+							aceBCSendAsyncMsgHP(device_info_bc.cardNum, pBCmsg->id, pBCmsg->data, pBCmsg->length, MINOR_FRAME_TIME); 
+#else
+							aceBCSendAsyncMsgHP(device_info_bc.cardNum, pBCmsg->id, MINOR_FRAME_TIME); 
+#endif
+							if (m_set_followMsgID.find(pBCmsg->id) != m_set_followMsgID.end()){
+								RecvAsyncMsg(pBCmsg->id);
+							} 
+#ifndef IPCORE
+							aceBCMsgDelete(device_info_bc.cardNum, pBCmsg->id);
+							aceBCDataBlkDelete(device_info_bc.cardNum, pBCmsg->blkid);
+#endif
+						}
+					}
+				}
+			}
+		} //end of while(1)
+	} //end of for
+}
+
+/*
+ * 中断函数
+ *
+ */
+void _DECL BrAda1553B_BC_COMM::MyISR( S16BIT DevNum, U32BIT dwIrqStatus )
+{
+	if(!(dwIrqStatus & ACE_IMR2_BC_UIRQ0)){
+		return;
+	}
+	
+	BrAda1553B_BC_COMM* pThis = s_adapt[DevNum];
+
+	/*end of message
+	if (dwIrqStatus == 1)
+	{
+		it->m_irqCount++;
+		if (it->isCanMiss)
+		{
+			if (it->m_missFreq != 0 && (m_irqCount % m_missFreq == 0))
+			{
+				aceBCSetGPFState(DevNum, it->GPF, ACE_GPF_CLEAR);
+			}else{
+				aceBCSetGPFState(DevNum, it->GPF, ACE_GPF_SET);
+			}
+		}
+		if (it->channel == CHANNEL_AB)
+		{
+			it->Modify(DevNum);
+		}
+		if (it->isTimeCode){
+			it->SetTimecode(DevNum, pThis->m_sys_service);
+		}
+	}
+*/
+	pThis->ProcessVector(); 
+	// 处理write进来的数据
+	//pThis->deal_data();
+	pThis->m_itr_count++;
+
+	S16BIT frameID = (S16BIT)(pThis->m_itr_count % pThis->m_minorFrameCount);
+	if (frameID == 0){
+		frameID = pThis->m_minorFrameCount;
+	}
+	//设置周期消息的停发，同时调整通道
+	for(vector<BC_Msg>::iterator it = pThis->m_vec_msg.begin(); it != pThis->m_vec_msg.end(); it++) {
+		//如果该消息在不当前小帧中，退出
+		if (pThis->m_set_msgPlace.find(make_pair(frameID, it->id)) == pThis->m_set_msgPlace.end()){
+			continue;
+		}
+		it->m_irqCount++;
+		if(it->sendTiming == SENDTIMING_ALWAYS){
+			//按设置频率漏发消息
+			if( (it->m_missFreq != 0) && 
+				(it->m_irqCount  % it->m_missFreq == 0)){
+				aceBCSetGPFState(DevNum, it->GPF, ACE_GPF_CLEAR);
+				continue;
+			}
+			it->Modify(DevNum);
+			if (!it->m_isBrokenMode){
+				it->SetBCData(DevNum, pThis->m_sys_service);
+			}
+			aceBCSetGPFState(DevNum, it->GPF, ACE_GPF_SET);
+		}
+	}
+}
+
+/*
+ * 设置IP地址和卡号
+ *
+ */
+void BrAda1553B_BC_COMM::set_address(const string &host_addr,
+		const std::string &if_addr) {
+	device_info_bc.hostAddr = host_addr;
+	device_info_bc.cardNum = atoi(if_addr.c_str());
+	S16BIT card = device_info_bc.cardNum;
+	BrAda1553B_BC_COMM::s_adapt[card] = this;
+}
+
+/*
+* 设置接口对象
+*
+*/
+/* zhanghao close.
+void BrAda1553B_BC_COMM::set_interface(const Interface *if_obj){
+	m_interface = if_obj;
+}
+*/
+
+/*
+* 设置配置字符串
+*
+*/
+void BrAda1553B_BC_COMM::set_config(const std::string &cfg) {
+	string cfg_copy = cfg;
+	string::size_type pos = 0;
+	while((pos = cfg_copy.find(';', pos)) != std::string::npos){
+		pos++;
+		cfg_copy.insert(pos, "\n\r", 2);
+	}	
+	#if 0
+  qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("set_config_111 the reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);
+  #endif
+	get_config_value(cfg_copy, "ConfFile", m_fileName);
+	m_fileName = "agent.rc/" + m_fileName;
+	#if 0
+	qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("set_config_222 the reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);
+  #endif
+	get_config_value(cfg_copy, "ChangeEndian", BC_Adapter_changeEndian);
+	#if 0
+	qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("set_config_333 the reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);	
+	#endif
+}
+
+/*
+ * 开始测试
+ *
+ */
+void BrAda1553B_BC_COMM::start(SyncEvent *tim_mutex, long test_id,
+		Agent::ISysServ *svr) {
+	//这里应该创建所有东西，然后让bc开始工作
+	if (work_stat == WS_RUN) {
+		return;
+	}
+	m_minorFrameCount = 0;
+#ifdef WIN32
+	readConfFile(m_fileName, O_RDONLY | O_BINARY);
+#else
+	readConfFile(m_fileName, O_RDONLY);
+#endif
+	m_sys_service = svr;
+	m_write_data_buf.clear();
+	m_read_data_buf.clear();
+	m_itr_count = 0;
+	m_isBrokenMode = FALSE;
+
+	// 各类id的初始值一定要重置，否则一味的增长，start多次之后，会和那些定死的id值发生冲突
+	BC_Ops::init();
+//	std::cout << "1553B BC begin start!" << std::endl;
+
+	if (m_minorFrameCount == 0){
+		throw std::logic_error("[BrAda1553B_BC_COMM::Start][WARNING] m_minorFrameCount is 0.");
+	}
+
+	S16BIT DevNum = device_info_bc.cardNum;
+	S16BIT nResult = 0x0000;
+
+#ifdef ALL_MODE
+    HWVERSIONINFO structHWVersionInfo;
+    nResult = aceGetHwVersionInfo(DevNum, &structHWVersionInfo);
+    if(nResult){
+ //   	printf("BC::aceInitialize\n");
+    	nResult = aceInitialize(DevNum,ACE_ACCESS_CARD,ACE_MODE_ALL,0,0,0);
+    	printf("BC::aceInitialize ACE_MODE_ALL\n");
+        if(nResult){
+        	nResult = aceInitialize(DevNum,ACE_ACCESS_CARD,ACE_MODE_BC,0,0,0);
+        	printf("BC::aceInitialize ACE_MODE_BC\n");
+            if(nResult){
+        		print_err_str(nResult);
+        		throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceInitialize failed.");
+            }
+        }
+    }
+#else
+ 	nResult = aceInitialize(DevNum, ACE_ACCESS_CARD, ACE_MODE_BC, 0, 0, 0);
+	if (nResult) {
+		print_err_str(nResult);
+		throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceInitialize failed.");
+	}
+#endif
+	
+	// 增加自动重试功能，重试两次，第一次在本总线重试，第二次在另一条总线重试
+	nResult = aceBCSetMsgRetry(DevNum, ACE_RETRY_TWICE, ACE_RETRY_SAME, ACE_RETRY_ALT, 0);
+	if (nResult) {
+		print_err_str(nResult);
+		throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceBCSetMsgRetry failed.");
+	}
+	// 设置异步消息的优先级
+	nResult = aceBCConfigure(DevNum, ACE_BC_ASYNC_BOTH);
+	if (nResult) {
+		print_err_str(nResult);
+		throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceBCConfigure failed.");
+	}
+
+#ifndef ALL_MODE
+	nResult = aceSetIrqConditions(DevNum, TRUE, ACE_IMR2_BC_UIRQ0, MyISR);
+	if (nResult) {
+		print_err_str(nResult);
+		throw std::runtime_error("[BrAda1553B_BC_COMM::start][ERROR] aceSetIrqConditions failed.");
+	}
+#else
+	ddc1553b_ISR::m_pBC = this;
+	ddc1553b_ISR::setISR(DevNum);
+#endif	
+	
+	// 开启message gap的定时器
+	aceBCMsgGapTimerEnable(DevNum, TRUE);
+
+	for (vector<BC_Msg>::iterator it = m_vec_msg.begin(); it != m_vec_msg.end(); it++) {
+		//载入仿真文件
+		if (it->isFromFile)
+		{
+			it->loadSimFile();
+		}
+		//初始化时间码消息的所需信息
+		/* zhanghao close.
+		if (it->isTimeCode){
+			it->InitTimecode(m_sys_service->get_icd(), m_interface);
+		}
+		*/
+		//创建所有同步消息，这些消息的数据量不会超过32个数据字
+		if(!it->isAsync){  
+			it->Create(DevNum);
+			it->SetBCData(device_info_bc.cardNum, m_sys_service);
+		}
+#ifdef IPCORE
+		//IPCORE中，异步消息也得提前创建
+		if(it->isAsync){  
+			it->Create(DevNum);
+			it->SetBCData(device_info_bc.cardNum, m_sys_service);
+		}
+#endif
+	}
+
+	//创建MINOR帧
+	BC_Ops *minorops = new BC_Ops[m_minorFrameCount], majorops;
+	MakeMinorOps(DevNum, minorops);
+	//添加Minor1frame
+	for (int i = 0; i < m_minorFrameCount; i++) {
+#ifndef IPCORE
+		//在每个小帧的末尾加上一个中断操作
+		minorops[i].AddOp(DevNum, ACE_OPCODE_IRQ,1);
+#endif
+		nResult = aceBCFrameCreate(DevNum, i+1, ACE_FRAME_MINOR,
+				minorops[i].GetArrayAddr(), minorops[i].GetSize(),
+				MINOR_FRAME_TIME, 0);
+		if (nResult) {
+			print_err_str(nResult);
+			throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceBCFrameCreate failed.");
+		}
+	}
+	delete [] minorops;
+
+    printf("BC processing -----1\n");
+  qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("111  reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);
+  
+	if (m_itrMsgCount == 0){
+		m_itrMsgCount = m_minorFrameCount;
+	}
+
+	//创建MAJOR帧
+	MakeMajorOps(DevNum, majorops);
+	nResult = aceBCFrameCreate(DevNum, MAJOR_FRAME_ID, ACE_FRAME_MAJOR,
+			majorops.GetArrayAddr(), majorops.GetSize(), 0, 0);
+	if (nResult) {
+		print_err_str(nResult);
+		throw std::runtime_error("[BrAda1553B_BC_COMM::Start][ERROR] aceBCFrameCreate failed.");
+	}
+
+ printf("BC processing -----2\n");
+   qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("222 the reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);
+ 
+	//这里清空所有的异步消息，以后创建的所有消息都时低优先级的异步消息
+	aceBCEmptyAsyncList(DevNum);
+	aceBCResetAsyncPtr(DevNum);
+	//开始
+	aceBCStart(DevNum, MAJOR_FRAME_ID, -1);
+	work_stat = WS_RUN;
+
+     printf("BC process-----3\n");
+   qiu_reg1_val = AtReadReg( DevNum, 1 );
+  printf("333 the reg one value is 0x%x ^^^^^^^^^^^^^^^^^^^\n",qiu_reg1_val);	
+	p_AdaBC = this;
+	std::cout << "1553B BC started!" << std::endl;
+}
+
+/*
+ * 停止测试
+ *
+ */
+void BrAda1553B_BC_COMM::stop() {
+	work_stat = WS_STOP;
+	p_AdaBC = NULL;
+	//停止
+	aceBCStop(device_info_bc.cardNum);
+	aceFree(device_info_bc.cardNum);
+	m_write_data_buf.clear();
+	m_read_data_buf.clear();
+	m_vec_msg.clear();
+	m_set_followMsgID.clear();
+	m_multimap_followMsg.clear();
+	m_itr_count = 0;
+#ifdef ALL_MODE
+	ddc1553b_ISR::m_pBC = NULL;
+#endif
+	std::cout << "1553B BC stoped!" << std::endl;
+}
+
+/*
+ * 将消息组成小帧
+ *
+ */
+void BrAda1553B_BC_COMM::MakeMinorOps(S16BIT DevNum, BC_Ops* ops) {
+	//遍历m_map_msgPlace
+	for (int frameIndex=0; frameIndex<m_minorFrameCount; frameIndex++)
+	{
+		vector<S16BIT> vec = m_map_msgPlace[frameIndex+1];
+		//遍历每个小帧对应的vector
+		for (U32BIT j=0; j<vec.size(); j++)
+		{
+			S16BIT messID = vec[j];
+			S16BIT messIndex = m_mapID[messID];
+			BC_Msg* pMsg = &(m_vec_msg[messIndex]);
+			ops[frameIndex].AddMsg(DevNum, *pMsg, pMsg->GPF);
+
+			/// 对于根据其他消息数据判断发送的同步消息，在其后加入清除GPF操作
+			if (pMsg->sendTiming == SENDTIMING_FOLLOW_SYNC){
+				/// 加入清除GPF的操作
+				S16BIT tempGPF = 1 << (8 + pMsg->GPF);
+				ops[frameIndex].AddOp(DevNum, ACE_OPCODE_FLG, tempGPF);
+				/// 让AB通道交替的GPF消息从B通道开始
+				if (pMsg->channel == CHANNEL_AB)
+				{
+					pMsg->m_irqCount++;
+				}
+			}
+		}
+	}
+}
+
+/**
+ * 将小帧组成大帧
+ *
+ */
+void BrAda1553B_BC_COMM::MakeMajorOps(S16BIT DevNum, BC_Ops& ops) {
+	for (int i = 0; i < m_minorFrameCount; i++)
+		ops.AddOp(DevNum, ACE_OPCODE_CAL, i+1);
+}
+
+/**
+ * 读数据，该adapter不读数据。
+ */
+/* zhanghao close.
+ssize_t BrAda1553B_BC_COMM::read(Agent::DevDataHeader *head, char *buffer,
+		size_t length) {
+	printf("[BrAda1553B_BC_COMM::read][ERROR]BrAda1553B_BC_COMM can't read.\n");
+	return GIST::R_CANCEL;
+}
+*/
+
+/**
+ * 处理指令。
+ */
+/* zhanghao close.
+GIST::BR_OPERATION_R BrAda1553B_BC_COMM::write(const Agent::DevDataHeader *head,
+		const char *data, size_t len) {
+	ddcDataHeader h;
+	h.size = len;
+	h.extra_size = head->extra_size;
+	memcpy(h.dest_address, head->dest_address, GIST::BR_ADDRESS_LEN);
+	memcpy(h.src_address, head->src_address, GIST::BR_ADDRESS_LEN);
+	memcpy(h.dest_subaddress, head->dest_subaddress, GIST::BR_SUB_ADDR_LEN);
+	memcpy(h.src_subaddress, head->src_subaddress, GIST::BR_SUB_ADDR_LEN);
+
+	string srcaddr = head->src_address;
+	/// 变换消息通道
+	if(srcaddr == "3"){
+		string srcsubaddr = head->src_subaddress;
+		const char* p = data + h.extra_size;
+		S16BIT messID = *reinterpret_cast<const S16BIT*>(p);  p += 2;
+		S16BIT index = -1;
+		U16BIT chan = *reinterpret_cast<const U16BIT*>(p);
+
+		//检查消息ID
+		if (m_mapID.find(messID) != m_mapID.end()){
+			index = m_mapID[messID];
+		} 
+		else{
+			if (srcsubaddr == "1" || srcsubaddr == "2"){
+				printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 3)invalid messID:%d. \n", messID);
+				throw logic_error("请检查消息ID。");
+			}
+		}
+
+		//检查消息通道
+		if((srcsubaddr == "1" || srcsubaddr == "3") && 
+		   (chan != CHANNEL_A) && (chan != CHANNEL_B)){
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 3)invalid channel:%d. \n", chan);
+			throw logic_error("请检查消息通道。");
+		}
+
+		//将指定消息变换到指定通道
+		if(srcsubaddr == "1"){
+			m_vec_msg[index].channel = (enumChannel)chan;
+		}
+		//切换指定消息的通道
+		else if(srcsubaddr == "2"){
+			if(m_vec_msg[index].channel == CHANNEL_A){
+				m_vec_msg[index].channel = CHANNEL_B;
+			}
+			else if(m_vec_msg[index].channel == CHANNEL_B){
+				m_vec_msg[index].channel = CHANNEL_A;
+			}
+		}
+		//切换指定通道上所有消息的通道
+		else if(srcsubaddr == "3"){
+			U16BIT chan_after;
+			if(chan == CHANNEL_A){
+				chan_after = CHANNEL_B;
+			}
+			else if(chan == CHANNEL_B){
+				chan_after = CHANNEL_A;
+			}
+			for(vector<BC_Msg>::iterator it = m_vec_msg.begin(); it != m_vec_msg.end(); it++) {
+				if(it->channel == chan){
+					it->channel = (enumChannel)chan_after;
+				}		
+			}
+		}
+		//切换所有消息的通道
+		else if(srcsubaddr == "4"){
+			for(vector<BC_Msg>::iterator it = m_vec_msg.begin(); it != m_vec_msg.end(); it++) {	
+				if(it->channel == CHANNEL_A){
+					it->channel = CHANNEL_B;
+				}
+				else if(it->channel == CHANNEL_B){
+					it->channel = CHANNEL_A;
+				}
+			}
+		}
+		else{
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 3)invalid src_subaddr:%s. \n", srcsubaddr.c_str());
+			throw logic_error("请检查源子地址。");
+		}
+	}
+	//漏发某些消息指令
+	else if(srcaddr == "4"){
+		const char* p = data + h.extra_size;
+		U16BIT freq = *reinterpret_cast<const U16BIT*>(p);  p += 2;
+
+		//得到消息ID数组长度
+//		int count = (h.size - h.extra_size - 2) / 2;
+		int count = 0;
+		
+		std::vector<ICD::Routing *> routings = const_cast<ICDMan*>(m_sys_service->get_icd())->MatchRoutes(const_cast<Interface*>(m_interface),
+			"4", "", "", "");
+		if ( routings.size() >= 1 ){
+			BlockAttr * blockAttr = const_cast<ICDMan*>(m_sys_service->get_icd())->GetBlock(routings[0]);
+			ICD::Block* block= const_cast<ICDMan*>(m_sys_service->get_icd())->GetBlock(blockAttr);
+			ICDMan::MemNode::iterator itr = const_cast<ICDMan*>(m_sys_service->get_icd())->GetMembers(block);
+			itr++;
+			const Field *field = itr->GetField();
+			count = field->GetArraySize();
+		}
+
+		S16BIT messID = -1;
+		S16BIT index = -1;
+		for(int i=0; i<count; i++){
+			messID = *reinterpret_cast<const S16BIT*>(p);  p += 2;
+			//检查消息ID
+			if (m_mapID.find(messID) != m_mapID.end()){
+				index = m_mapID[messID];
+			} 
+			else{
+				printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 4)invalid messID:%d. \n", messID);
+				throw logic_error("请检查消息ID。");
+			}
+
+			if(!m_vec_msg[index].isCanMiss){
+				printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 4)messID:%d can't miss. \n", messID);
+				throw logic_error("指令中的有些消息是不能停发漏发的");
+			}
+			m_vec_msg[index].m_missFreq = freq;
+		}
+	}
+	//停发某些消息指令
+	else if(srcaddr == "5"){
+		const char* p = data + h.extra_size;
+		//得到消息ID数组长度
+//		int count = (h.size - h.extra_size) / 2;
+		int count = 0;
+		
+		std::vector<ICD::Routing *> routings = const_cast<ICDMan*>(m_sys_service->get_icd())->MatchRoutes(const_cast<Interface*>(m_interface),
+			"5", "", "", "");
+		if ( routings.size() >= 1 ){
+			BlockAttr * blockAttr = const_cast<ICDMan*>(m_sys_service->get_icd())->GetBlock(routings[0]);
+			ICD::Block* block= const_cast<ICDMan*>(m_sys_service->get_icd())->GetBlock(blockAttr);
+			ICDMan::MemNode::iterator itr = const_cast<ICDMan*>(m_sys_service->get_icd())->GetMembers(block);
+			const Field *field = itr->GetField();
+			count = field->GetArraySize();
+		}
+
+		S16BIT messID = -1;
+		S16BIT index = -1;
+		for(int i=0; i<count; i++){
+			messID = *reinterpret_cast<const S16BIT*>(p);  p += 2;
+			//检查消息ID
+			if (m_mapID.find(messID) != m_mapID.end()){
+				index = m_mapID[messID];
+			} 
+			else{
+				printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 5)invalid messID:%d. \n", messID);
+				throw logic_error("请检查消息ID。");
+			}
+			//试了下,这函数好像不起作用
+			//int nResult = aceBCDisableMessage(device_info_bc.cardNum, messID, TRUE);
+			//if(nResult < 0)
+			//{
+			//	printf("Error in aceBCDisableMessage() function \n");
+			//	print_err_str(nResult);
+			//	return GIST::R_FAILURE;
+			//}
+			if(!m_vec_msg[index].isCanMiss){
+				printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 5)messID:%d can't stop. \n", messID);
+				throw logic_error("指令中的有些消息是不能停发漏发的");
+			}
+			m_vec_msg[index].m_missFreq = 1;
+		}
+	}
+	//停止或开始BC
+	else if(srcaddr == "6"){
+		const char* p = data + h.extra_size;
+		U16BIT opt = *reinterpret_cast<const U16BIT*>(p);  
+		//停止BC
+		if (opt == 1){
+			aceBCStop(device_info_bc.cardNum);
+//			aceFree(device_info_bc.cardNum);
+			printf("[BrAda1553B_BC_COMM::write](srcaddr == 6)stop BC. \n");
+		} 
+		//开始BC
+		else if(opt == 2){
+			aceBCStart(device_info_bc.cardNum, MAJOR_FRAME_ID, -1);
+			printf("[BrAda1553B_BC_COMM::write](srcaddr == 6)start BC. \n");
+		}
+		else{
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 6)invalid opt:%d. \n", opt);
+			throw logic_error("请检查参数。");
+		}
+	}
+	//数据注入
+	else if(srcaddr == "2"){
+		string srcsubaddr = head->src_subaddress;
+		S16BIT messID = *reinterpret_cast<const S16BIT*>(data + h.extra_size);
+		S16BIT index = -1;
+		U16BIT datalen = *reinterpret_cast<const U16BIT*>(data + h.extra_size + 2);
+		//检查消息ID，index=ID-1
+		if (m_mapID.find(messID) != m_mapID.end()){
+			index = m_mapID[messID];
+		} 
+		else{
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 2)invalid messID:%d. \n", messID);
+			throw logic_error("请检查消息ID。");
+		}
+		BC_Msg* pmsg = &m_vec_msg[index];
+
+		if (pmsg->sendTiming != SENDTIMING_DUP || !pmsg->isAsync){
+			printf("[BrAda1553B_BC_COMM::write]数据注入失败，该消息不是数据注入消息。 messID is %d.\r\n", messID);
+			throw logic_error("指令中配置的消息非数据注入消息");
+		}
+		
+		if (srcsubaddr == "1"){
+			if (datalen > (h.size - h.extra_size - 4)){
+				printf("[BrAda1553B_BC_COMM::write]sjzr failed. datalen > (h.size - h.extra_size - 4).\r\n");
+				throw logic_error("请检查消息长度。");
+			}
+		}
+
+		if (srcsubaddr != "1" && srcsubaddr != "2"){
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 2)invalid src_subaddr:%s. \n", srcsubaddr.c_str());
+			throw logic_error("请检查源子地址。");
+		} 
+
+		unsigned short packlen = 64;
+		char * data1553 = (char *)data + head->extra_size + 4;
+		//把index放到dest_address中，小包长度放在dest_subaddress中
+		sprintf(h.dest_address, "%d", index);
+		//拆成32个字的小包
+		size_t dui_len = 0;
+		while( dui_len < datalen )
+		{
+			h.size = ( datalen - dui_len > packlen ) ? packlen : ( datalen - dui_len );
+			sprintf(h.dest_subaddress, "%d", h.size);
+			h.extra_size = 0;
+			dui_len += h.size;
+			char * p = data1553;
+			data1553 += h.size;
+			m_write_data_buf.push(h, p );
+		}
+
+	}
+	//修改消息数据
+	else if(srcaddr == "1"){
+		S16BIT messID = *reinterpret_cast<const S16BIT*>(data + head->extra_size); 
+		//检查消息ID
+		if (m_mapID.find(messID) == m_mapID.end()){
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 1)invalid messID:%d. \n", messID);
+			throw logic_error("请检查消息ID。");
+		}
+		S16BIT index = m_mapID[messID];
+		BC_Msg* pmsg = &m_vec_msg[index];
+		if ( (pmsg->sendTiming == SENDTIMING_ALWAYS && m_set_msgID_inFrame.find(messID) == m_set_msgID_inFrame.end()) 
+			  || pmsg->sendTiming == SENDTIMING_DUP)
+		{
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 1)invalid messID:%d. \n", messID);
+			throw logic_error("请检查消息ID。");
+		}
+		
+		m_write_data_buf.push(h, data);
+	}
+	//故障模式
+	else if (srcaddr == "7")
+	{
+		string srcsubaddr = head->src_subaddress;
+		if (srcsubaddr == "1"){ //进入故障模式
+			m_isBrokenMode = TRUE;
+		} 
+		else if (srcsubaddr == "2"){ //退出故障模式
+			for(vector<BC_Msg>::iterator it = m_vec_msg.begin(); it != m_vec_msg.end(); it++) {
+				if (it->isFromFile){
+					it->m_pbuff = it->m_buff;
+				}
+				it->m_isBrokenMode = FALSE;
+			}
+			m_isBrokenMode = FALSE;
+		}
+		else{
+			printf("[BrAda1553B_BC_COMM::write][warning](srcaddr == 7)invalid src_subaddr:%s.\n", srcsubaddr.c_str());
+			throw logic_error("请检查源子地址。");
+		}
+	}
+	else{
+		printf("[BrAda1553B_BC_COMM::write][warning]invalid src_addr:%s.\n", srcaddr.c_str());
+		throw logic_error("请检查源地址。");
+	}
+#ifdef IPCORE
+	deal_data();
+#endif
+	return GIST::R_SUCCESS;
+}
+*/
+
+/**
+ * 打印错误信息。
+ */
+void BrAda1553B_BC_COMM::print_err_str(S16BIT result) {
+#ifndef IPCORE
+	// 错误字符串
+	char error_str[128];
+	aceErrorStr(result, error_str, 128);
+#endif
+//	printf("result_no:%d;err_info:%s\r\n", result, error_str);
+}
+
+void BrAda1553B_BC_COMM::readConfFile(string file_name, int mode){
+	int retry_num = 3;
+	while ( --retry_num >= 0 ) {
+		struct stat file_stat;
+		if ( (stat(file_name.c_str(), &file_stat) != 0 ) ) {
+			std::cout << "BrAda1553B_BC_COMM::readConfFile: file '" << file_name << "' not found." << std::endl;
+			usleep(1);
+			continue;
+		}
+		if ( file_stat.st_size <= 0 ) {
+#if _TRACE > 4
+			std::cout << "SimulatorMan::AddDev(): file '" << file_name << "': no contents." << std::endl;
+#endif
+			break;
+		}
+#ifdef WIN32
+		int fd = _open(file_name.c_str(), mode, 0);
+#else
+		int fd = open(file_name.c_str(), O_RDONLY, 0);
+#endif
+		if ( fd == -1 ) {
+			std::cerr << "open file '" << file_name << "' failed: " << errno << std::endl;
+			usleep(1);
+			continue;
+		}
+		size_t count = file_stat.st_size;
+#if _TRACE > 4
+		std::cout << "file[" << file_name << "] size is " << count << " bytes." << std::endl;
+#endif
+		char *buffer = new char[count];
+		if (!buffer){
+			std::cout << "BrAda1553B_BC_COMM::readConfFile: new failed.\n";
+			close(fd);
+			return;
+		}
+		size_t remains = count;
+		char *p = buffer;
+		// 读出数据
+		while ( remains > 0 ) {
+			int nrd = ::read(fd, p, remains);
+			if ( nrd < 0 )
+				break;
+			p += nrd;
+			remains -= nrd;
+		}
+		if ( remains > 0 ) { // error, load failed!
+			close(fd);
+			delete []buffer;
+			buffer = NULL;
+#if _TRACE > 4
+			std::cerr << "read file '" << file_name << "' error: " << errno << std::endl;
+#endif
+			usleep(1);
+			continue;
+		}
+		close(fd);
+		try {
+			// 数据提供给解析模块
+			parseConfFile(buffer, count);
+			/*************************************************
+			FILE *fp ;
+			fp = fopen("bc_config", "w+");
+			if(NULL != fp)
+			{
+                          fwrite(buffer,1,count,fp);
+			}
+			else
+			{
+                          printf("fopen error...\n");
+			}
+			/*****************************************************/
+		}
+		catch ( ... ) {
+			// 避免内存泄露
+			delete []buffer;
+			throw;
+		}
+		delete []buffer;
+		break;
+	}
+}
+
+/**
+* 解析配置文件，也就是BC配置文件BC_conf.bat的内容。
+CHECK_STRING + 消息结构体长度 + 小帧个数 + 小帧延时 + 消息个数 + 消息n + 消息位置个数 + 消息位置n
+*/
+void BrAda1553B_BC_COMM::parseConfFile(char* data, int len){
+//	printf("[BC]: parseConfFile.\n");
+	m_itrMsgCount = 0;
+	const char* p = data;
+
+	//CHECK_STRING
+	if (memcmp(p, CHECK_STRING, sizeof(CHECK_STRING))){
+		throw std::logic_error("[BrAda1553B_BC_COMM::write_data][ERROR]ConfFile is not a valied BC configure file.");
+	}
+	p += sizeof(CHECK_STRING);
+
+	//消息结构体长度
+	int messLen = *reinterpret_cast<const int*>(p);  p += 4;
+#ifdef __vxworks
+	Br_Util::swap_bytes(messLen);
+#endif
+	if (messLen != sizeof(BC_Msg_info)){
+		throw std::logic_error("[BrAda1553B_BC_COMM::write_data][ERROR]ConfFile's version is too low.");
+	}
+
+	//取得小帧个数
+	m_minorFrameCount = *reinterpret_cast<const int*>(p);  p += 4;
+#ifdef __vxworks
+	Br_Util::swap_bytes(m_minorFrameCount);
+#endif
+	for (int i=0; i<m_minorFrameCount; i++){
+		m_map_msgPlace.insert(make_pair(i+1,vector<S16BIT>()));
+	}
+	//取得小帧延时
+#ifdef __vxworks
+	MINOR_FRAME_TIME = *reinterpret_cast<const int*>(p);   p += 4;
+	Br_Util::swap_bytes(MINOR_FRAME_TIME);
+#else
+	MINOR_FRAME_TIME = *reinterpret_cast<const int*>(p);   p += 4;
+#endif
+	MAJOR_FRAME_TIME = m_minorFrameCount * MINOR_FRAME_TIME;
+
+	map<unsigned int, short> mapGPF_time;  //<time, GPF>
+	vector<pair<FollowInfo, short> > vecGPF_follow;  //<followInfo, GPF>
+	m_GPF = 2;  //从2开始
+	//消息个数
+	//	int msg_count = (len - 8) / sizeof(BC_Msg_info);
+	int msg_count = *reinterpret_cast<const int*>(p);  p += 4;
+#ifdef __vxworks
+	Br_Util::swap_bytes(msg_count);
+#endif
+	for(int i=0; i<msg_count; i++){
+		BC_Msg msg;
+		memcpy(&msg, p, sizeof(BC_Msg_info));
+#ifdef __vxworks
+		Br_Util::swap_bytes(msg.id);
+		Br_Util::swap_bytes(msg.blkid);
+		Br_Util::swap_bytes(msg.type);
+		Br_Util::swap_bytes(msg.gap_time);
+		Br_Util::swap_bytes(msg.length);
+		Br_Util::swap_bytes(msg.channel);
+		Br_Util::swap_bytes(msg.Addr[0]);
+		Br_Util::swap_bytes(msg.Addr[1]);
+		Br_Util::swap_bytes(msg.Addr[2]);
+		Br_Util::swap_bytes(msg.Addr[3]);
+		Br_Util::swap_bytes(msg.sendTiming);
+		Br_Util::swap_bytes(msg.time);
+		Br_Util::swap_bytes(msg.followMsgID);
+		Br_Util::swap_bytes(msg.followValue);
+		Br_Util::swap_bytes(msg.followMask);
+		Br_Util::swap_bytes(msg.frameIndex);
+		Br_Util::swap_bytes(msg.followDataindex);
+		Br_Util::swap_bytes(msg.CRCMode);
+		Br_Util::swap_bytes(msg.CRCTiming);
+		Br_Util::swap_bytes(msg.packLen);
+		Br_Util::swap_bytes(msg.defaultValue);
+#endif
+		if(BC_Adapter_changeEndian){
+			swap_by_word((char*)msg.data, 64);
+		}
+		//设置isAsync
+		if (msg.sendTiming == SENDTIMING_FOLLOW_ASYNC || msg.sendTiming == SENDTIMING_DUP){
+			msg.isAsync = TRUE;
+		}else{
+			msg.isAsync = FALSE;
+		}
+		//对于根据别的消息结果判断是否发送的消息，设置m_set_followMsgID、m_multimap_followMsg
+		//同步但是小帧号不合法的这种消息不对其分配GPF
+		if(msg.sendTiming == SENDTIMING_FOLLOW_SYNC || msg.sendTiming == SENDTIMING_FOLLOW_ASYNC){ 
+			m_set_followMsgID.insert(msg.followMsgID);
+			m_multimap_followMsg.insert(make_pair(msg.followMsgID, i));
+			//如果是同步的,给消息分配GPF，并设置m_mapGPF
+			if (!msg.isAsync)
+			{
+				//同样判断信息的同步消息共用一个GPF
+				FollowInfo fi(msg.followMsgID, msg.followValue, msg.followMask, msg.followDataindex, msg.isCheckSrvbit);
+				vector<pair<FollowInfo, short> >::iterator it = vecGPF_follow.end();
+				for(it = vecGPF_follow.begin(); it != vecGPF_follow.end(); it++){
+					if(it->first == fi){
+						break;
+					}
+				}
+				if (it != vecGPF_follow.end()){
+					msg.GPF = it->second;
+				}else{
+					if (m_GPF > 6){
+						printf("[BrAda1553B_BC_COMM::write_data][WARNING] m_GPF > 6. msgId is %d.\n", msg.id);
+					}
+					msg.GPF = m_GPF;
+					vecGPF_follow.push_back(make_pair(fi, msg.GPF));
+					m_GPF++;
+				}
+				m_mapGPF[msg.GPF] = msg.id;
+			}
+		}
+
+		//对于可以停发漏发的固定消息，单独分配GPF
+		if (msg.sendTiming == SENDTIMING_ALWAYS && msg.isCanMiss){
+			if (m_GPF > 6){
+				printf("[BrAda1553B_BC_COMM::write_data][WARNING] m_GPF > 6. msgId is %d.\n", msg.id);
+			}
+			msg.GPF = m_GPF;
+			m_GPF++;
+		}
+
+		if(msg.isFromFile && msg.packLen == 0){
+			msg.isFromFile = false;
+		}
+		
+		m_vec_msg.push_back(msg);
+		m_mapID.insert(make_pair(msg.id, i));
+		p += sizeof(BC_Msg_info);
+	}
+
+	//消息位置个数
+	int msgplace_count = *reinterpret_cast<const int*>(p);  p += 4;
+#ifdef __vxworks
+	Br_Util::swap_bytes(msgplace_count);
+#endif
+	for(int i=0; i<msgplace_count; i++){
+		S16BIT tempFrameID = *reinterpret_cast<const S16BIT*>(p);  p += 2;
+#ifdef __vxworks
+		Br_Util::swap_bytes(tempFrameID);
+#endif
+		S16BIT tempMsgID = *reinterpret_cast<const S16BIT*>(p);  p += 2;
+#ifdef __vxworks
+		Br_Util::swap_bytes(tempMsgID);
+#endif
+		m_set_msgPlace.insert(make_pair(tempFrameID, tempMsgID));
+		m_map_msgPlace[tempFrameID].push_back(tempMsgID);
+		m_set_msgID_inFrame.insert(tempMsgID);
+	}
+}
+
+/**
+ * 处理write进来的数据。
+ */
+/* zhanghao close.  
+void BrAda1553B_BC_COMM::deal_data() {
+	while (m_write_data_buf.size() > 0) {
+		ddcDataHeader *head = m_write_data_buf.get_front_header();
+		const char *data = m_write_data_buf.get_front_data();
+
+		string srcaddr = head->src_address;
+		string srcsubaddr = head->src_subaddress;
+		string dstaddr = head->dest_address;
+		string dstsubaddr = head->dest_subaddress;
+		//修改数据
+		if (srcaddr == "1")
+		{
+			S16BIT messID = *reinterpret_cast<const S16BIT*>(data + head->extra_size); 
+			S16BIT index = m_mapID[messID];
+			int len = head->size - head->extra_size - 2;
+			if (len > 2*m_vec_msg[index].length){
+				len = 2*m_vec_msg[index].length;
+			}
+			memcpy((char*)m_vec_msg[index].data, data+2, len);
+			aceBCDataBlkWrite( device_info_bc.cardNum, m_vec_msg[index].blkid, m_vec_msg[index].data, 32, 0 );
+			if(m_isBrokenMode){
+				m_vec_msg[index].m_isBrokenMode = TRUE;}
+		} 
+		//数据注入
+		else if(srcaddr == "2")
+		{
+			S16BIT index = atoi(dstaddr.c_str() );
+			U16BIT datalen = atoi(dstsubaddr.c_str() );
+			BC_Msg* pmsg = &m_vec_msg[index];
+
+			size_t data_size_1553 = datalen;
+			bool is_odd_size = datalen % 2 > 0;
+			if (is_odd_size) {
+				data_size_1553 = datalen + 1;
+			}
+			//如果有数据
+			if (srcsubaddr == "1"){
+				char *data1553 = const_cast<char*>(data);
+				if (is_odd_size) {
+					data1553 = new char[data_size_1553];
+					memset(data1553, 0, data_size_1553);
+					memcpy(data1553, data, datalen);
+				}
+				memcpy((void*)pmsg->data, (unsigned char *)data1553, data_size_1553);
+				if (is_odd_size) {
+					delete[] data1553;
+				}
+			} 
+			
+			pmsg->length = data_size_1553 / 2;
+					
+#ifndef IPCORE
+			//创建并发出异步消息
+			pmsg->Create(device_info_bc.cardNum);
+#endif
+			//IPCORE中的异步消息在真的设置标志位时再填消息，防止时间码不准
+			if (!pmsg->m_isBrokenMode){
+				pmsg->SetBCData(device_info_bc.cardNum, m_sys_service);
+			}
+
+#ifdef IPCORE
+			S16BIT result = aceBCSendAsyncMsgHP(device_info_bc.cardNum, pmsg->id, pmsg->data, pmsg->length, MINOR_FRAME_TIME);
+#else
+			S16BIT result = aceBCSendAsyncMsgHP(device_info_bc.cardNum, pmsg->id, MINOR_FRAME_TIME); 
+#endif
+			if (result < 0) {
+				print_err_str(result);
+			}
+			if (m_set_followMsgID.find(pmsg->id) != m_set_followMsgID.end()){
+				RecvAsyncMsg(pmsg->id);
+			} 
+#ifndef IPCORE
+			aceBCMsgDelete(device_info_bc.cardNum, pmsg->id);
+			aceBCDataBlkDelete(device_info_bc.cardNum, pmsg->blkid);
+#endif
+		}
+		m_write_data_buf.pop();
+	}
+}
+*/
+
+void BrAda1553B_BC_COMM::RecvAsyncMsg(short msgID){
+	S16BIT DevNum = device_info_bc.cardNum;
+	MSGSTRUCT Msg;
+	typedef std::multimap<S16BIT, S16BIT>::iterator itr;
+	std::pair<itr, itr> pos;
+
+	while (1) {
+		S16BIT res_vector = aceBCGetMsgFromIDDecoded(DevNum, msgID,
+			&Msg, TRUE);
+		if(res_vector <= 0){break;}
+
+		pos = m_multimap_followMsg.equal_range(msgID);
+		for(; pos.first != pos.second; pos.first++){
+			BC_Msg* pBCmsg = &(m_vec_msg[pos.first->second]);
+			//如果不检查服务请求位，或者检查服务请求位被设上
+			if (!pBCmsg->isCheckSrvbit || (Msg.wStsWrd1Flg > 0 && (Msg.wStsWrd1 & 0x0100) > 0)) {
+				U16BIT wVectorData = Msg.aDataWrds[pBCmsg->followDataindex-1];
+				//如果数据字与上判断mask的值等于判断值，发送消息
+				if((wVectorData & pBCmsg->followMask) == pBCmsg->followValue){
+					//同步消息
+					if(!pBCmsg->isAsync){ 
+						if (!pBCmsg->m_isBrokenMode){
+							pBCmsg->SetBCData(device_info_bc.cardNum, m_sys_service);
+						}
+						pBCmsg->Modify(device_info_bc.cardNum);
+						aceBCSetGPFState(DevNum, pBCmsg->GPF, ACE_GPF_SET);
+					}
+					//异步消息
+					else{  
+#ifndef IPCORE
+						pBCmsg->Create(device_info_bc.cardNum);
+#endif
+						if (!pBCmsg->m_isBrokenMode){
+							pBCmsg->SetBCData(device_info_bc.cardNum, m_sys_service);
+						}
+#ifdef IPCORE
+							aceBCSendAsyncMsgHP(device_info_bc.cardNum, pBCmsg->id, pBCmsg->data, pBCmsg->length, MINOR_FRAME_TIME); 
+#else
+							aceBCSendAsyncMsgHP(device_info_bc.cardNum, pBCmsg->id, MINOR_FRAME_TIME); 
+#endif
+						if (m_set_followMsgID.find(pBCmsg->id) != m_set_followMsgID.end()){
+							RecvAsyncMsg(pBCmsg->id);
+						} 
+#ifndef IPCORE
+						aceBCMsgDelete(device_info_bc.cardNum, pBCmsg->id);
+						aceBCDataBlkDelete(device_info_bc.cardNum, pBCmsg->blkid);
+#endif
+					}
+				}
+			}
+		}
+	} //end of while(1)
+}
